@@ -168,6 +168,11 @@ function semanticManifestError(m: TenantGateManifest): string | undefined {
 		if (!g.command.trim()) return `gate "${g.name}" has an empty command`;
 		if (g.timeoutMs <= 0) return `gate "${g.name}" has a non-positive timeoutMs`;
 		const e = g.expects;
+		// H-4 (gauntlet round 1): `expects.exit` is validated to 0, not merely accepted. Equality-only
+		// evaluation against an arbitrary value let a manifest declare `exit: 1` and land a broken script
+		// green — fail-closed has exactly one passing exit code, and it is 0. The field survives (a
+		// receipt that prints `exit: 0` states what was demanded) but only 0 is a legal demand.
+		if (e.exit !== 0) return `gate "${g.name}" declares expects.exit ${e.exit} — fail-closed accepts only exit 0 as a pass`;
 		if (e.parser === "raw" && (e.minTests !== undefined || e.exactCounts !== undefined)) {
 			return `gate "${g.name}" declares count assertions under parser "raw", which reads nothing but the exit code — the assertion could never be evaluated`;
 		}
@@ -273,20 +278,22 @@ export function refusalIsEnvironmental(code: GateRefusalCode): boolean {
 
 // ── Parser-aware evidence extraction ────────────────────────────────────────────────────────────
 
-/** bun test: `12 pass`, and its two explicit nothing-ran phrasings. */
+/** bun test: `12 pass` / `1 fail`, and its two explicit nothing-ran phrasings. `skip`/`todo` are
+ *  separate tokens bun never folds into `pass`/`fail`, so summing pass+fail already excludes them. */
 const BUN_PASS_RE = /\b(\d+) pass\b/g;
 const BUN_FAIL_RE = /\b(\d+) fail\b/g;
 const BUN_ZERO_RE = /\bRan 0 tests\b|did not match any test files/i;
-/** vitest: `Tests  12 passed (12)` / `Tests  1 failed | 11 passed (12)`, and its zero phrasings. */
+/** vitest: the `Tests  1 failed | 11 passed | 1 skipped (13)` summary line, and its zero phrasings. */
 const VITEST_TESTS_LINE_RE = /^\s*Tests\s+(.+)$/m;
-const VITEST_TOTAL_RE = /\((\d+)\)\s*$/;
+const VITEST_PASS_FAIL_RE = /(\d+)\s+(passed|failed)\b/g;
 const VITEST_ZERO_RE = /No test files found|no tests found|passWithNoTests/i;
 /** counts-script: `name=12` or `name: 12`, one per line — the shape a CI assert script emits. */
 const COUNTS_LINE_RE = /^\s*([A-Za-z0-9_.:-]+)\s*[=:]\s*(\d+)\s*$/gm;
 
 export interface GateEvidence {
-	/** Tests demonstrably executed. `0` means the output PROVES none ran; `undefined` means the
-	 *  output carries no readable count — a different, equally-refusable thing under a count contract. */
+	/** Tests demonstrably executed (passed + failed; skipped/todo do NOT count as ran). `0` means the
+	 *  output PROVES none ran; `undefined` means the output carries no readable count — a different,
+	 *  equally-refusable thing under a count contract. */
 	tests?: number;
 	/** Named counts from a counts-script gate. */
 	counts?: Record<string, number>;
@@ -297,6 +304,19 @@ export interface GateEvidence {
  * from the command string. The bun-only `ZERO_TESTS_RE`/`TESTS_RAN_RE` pair in gate-runner.ts is
  * exactly this function collapsed to one runner; a foreign tenant gets its own row instead of
  * silently inheriting bun's phrasing (R2 fail-open #4).
+ *
+ * THE GUARANTEE'S REAL SCOPE (opus, round 1, Medium — stated rather than implied): a builder controls
+ * its own gate's stdout, so a `tests: N` here proves the runner EMITTED a summary claiming N ran, not
+ * that N independent tests truly executed. A determined builder can forge "Tests 9999 passed". This
+ * closes the accidental fail-opens (a `--passWithNoTests` run, a stale summary line, skipped counted
+ * as ran); it is not, and cannot be, a defense against a builder deliberately forging its own output.
+ * The real defense against that is the hermetic sandbox + independent reviewer, not this parser.
+ *
+ * Two H-3 orderings are load-bearing:
+ *   - zero-markers are checked BEFORE any positive line, so a run that prints "No test files found"
+ *     AND carries a stale "Tests 3 passed" from earlier output reads as ZERO, not 3.
+ *   - only `passed`+`failed` count as ran; `skipped`/`todo` are excluded (vitest's `(N)` total folds
+ *     skipped in, so the total is deliberately not used).
  */
 export function readGateEvidence(parser: GateParser, output: string): GateEvidence {
 	if (parser === "raw") return {};
@@ -309,7 +329,7 @@ export function readGateEvidence(parser: GateParser, output: string): GateEviden
 		return { counts, tests };
 	}
 	if (parser === "bun-test") {
-		if (BUN_ZERO_RE.test(output)) return { tests: 0 };
+		if (BUN_ZERO_RE.test(output)) return { tests: 0 }; // zero-markers FIRST
 		let total = 0;
 		let saw = false;
 		for (const re of [BUN_PASS_RE, BUN_FAIL_RE]) {
@@ -322,20 +342,19 @@ export function readGateEvidence(parser: GateParser, output: string): GateEviden
 		return saw ? { tests: total } : {};
 	}
 	// vitest
+	if (VITEST_ZERO_RE.test(output)) return { tests: 0 }; // zero-markers FIRST — before any Tests line
 	const line = VITEST_TESTS_LINE_RE.exec(output)?.[1];
 	if (line) {
-		const total = VITEST_TOTAL_RE.exec(line)?.[1];
-		if (total !== undefined) return { tests: Number(total) };
-		// No parenthesised total (older reporters): sum the `N passed|failed|skipped` segments.
-		let sum = 0;
-		let saw = false;
-		for (const m of line.matchAll(/(\d+)\s+(passed|failed|skipped|todo)/g)) {
-			sum += Number(m[1]);
-			saw = true;
+		let ran = 0;
+		let sawPassFail = false;
+		VITEST_PASS_FAIL_RE.lastIndex = 0;
+		for (const m of line.matchAll(VITEST_PASS_FAIL_RE)) {
+			ran += Number(m[1]);
+			sawPassFail = true;
 		}
-		if (saw) return { tests: sum };
+		// A Tests summary that names only `skipped`/`todo` executed nothing — proven zero, not unknown.
+		return { tests: sawPassFail ? ran : 0 };
 	}
-	if (VITEST_ZERO_RE.test(output)) return { tests: 0 };
 	return {};
 }
 
@@ -348,24 +367,42 @@ export function readGateEvidence(parser: GateParser, output: string): GateEviden
  * happened to resolve). Then the exit code, then the counts. A gate that exits 0 having proven
  * nothing is refused as loudly as one that exits 1.
  */
+/** Executable-resolution failure shapes across the shells/runtimes a gate runs under. A missing
+ *  binary is an ENVIRONMENT fault (retryable), never the tenant's code failing (a permanent wedge). */
+const MISSING_BINARY_RE = /Executable not found in \$PATH|command not found|not found in \$PATH|is not recognized as an internal or external command|No such file or directory/i;
+
 export function evaluateGateRun(gate: TenantGate, run: { code: number; output: string; degraded?: boolean }): GateRefusal | undefined {
 	if (run.degraded) {
 		return { code: "degraded-sandbox", reason: `gate "${gate.name}" ran inside the DEGRADED bare sandbox image — the environment cannot be trusted as evidence either way; fix the sandbox image build and re-run` };
 	}
-	if (run.code !== gate.expects.exit) {
-		return { code: "gate-red", reason: `gate "${gate.name}" exited ${run.code}, contract demands ${gate.expects.exit}: ${gate.command}` };
+	// H-4 (gauntlet round 1): a missing binary (exit 127, or a non-127 exit whose output shows an
+	// executable-resolution failure) is the ENVIRONMENT lacking a tool the gate needs — retryable, and
+	// classified `command-unregistered` (which `refusalIsEnvironmental` reads as environmental) rather
+	// than `gate-red`. `gate-red` is non-retryable; misfiling a missing binary there wedges the branch
+	// permanently against a fault that has nothing to do with its code.
+	if (run.code === 127 || MISSING_BINARY_RE.test(run.output)) {
+		return { code: "command-unregistered", reason: `gate "${gate.name}" could not execute — the command was not found (exit ${run.code}): ${gate.command}. The environment lacks a binary the gate needs; retryable once it is provisioned.` };
 	}
-	const { minTests, exactCounts, parser } = gate.expects;
+	// Fail-closed has exactly one passing exit code, and the schema already forced `expects.exit` to 0.
+	if (run.code !== 0) {
+		return { code: "gate-red", reason: `gate "${gate.name}" exited ${run.code}, contract demands 0: ${gate.command}` };
+	}
+	const { exactCounts, parser } = gate.expects;
 	const evidence = readGateEvidence(parser, run.output);
-	if (minTests !== undefined) {
+	// H-3: a test parser (bun-test/vitest) requires POSITIVE evidence even when the contract names no
+	// explicit floor — declaring `parser: "bun-test"` IS the declaration that this gate runs tests, so
+	// an empty run under it is a fail-open, not a pass. `raw`/`counts-script` opt out (raw asserts only
+	// the exit; counts-script is judged by `exactCounts` below). An explicit `minTests` raises the bar.
+	const effectiveMin = gate.expects.minTests ?? (parser === "bun-test" || parser === "vitest" ? 1 : undefined);
+	if (effectiveMin !== undefined) {
 		if (evidence.tests === undefined) {
-			return { code: "count-unreadable", reason: `gate "${gate.name}" exited 0 but its output carries no readable ${parser} test count, and the contract demands at least ${minTests} — refusing to accept a pass that proves nothing ran` };
+			return { code: "count-unreadable", reason: `gate "${gate.name}" exited 0 but its output carries no readable ${parser} test count, and a test gate must prove at least ${effectiveMin} ran — refusing to accept a pass that proves nothing ran` };
 		}
 		if (evidence.tests === 0) {
-			return { code: "zero-tests", reason: `gate "${gate.name}" exited 0 having executed ZERO tests (contract demands at least ${minTests}) — the suite never ran` };
+			return { code: "zero-tests", reason: `gate "${gate.name}" exited 0 having executed ZERO tests (must run at least ${effectiveMin}) — the suite never ran` };
 		}
-		if (evidence.tests < minTests) {
-			return { code: "count-violated", reason: `gate "${gate.name}" executed ${evidence.tests} tests, contract demands at least ${minTests} — the suite ran short` };
+		if (evidence.tests < effectiveMin) {
+			return { code: "count-violated", reason: `gate "${gate.name}" executed ${evidence.tests} tests, contract demands at least ${effectiveMin} — the suite ran short` };
 		}
 	}
 	if (exactCounts) {

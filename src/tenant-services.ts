@@ -28,31 +28,51 @@
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { errText } from "./err-text.ts";
 import { dockerAvailable } from "./gate-runner.ts";
 import type { GateRefusal, TenantComposeService } from "./tenant-gates.ts";
 
-/** A spawn result reduced to what this module judges on. Injected in tests. */
+/** A spawn result reduced to what this module judges on. Injected in tests. `timeoutMs` bounds the
+ *  call (H-5): `up --wait` governs only Compose's own health-wait, so `down` and any real spawn need
+ *  their own ceiling or a hung docker leaves the land wedged. */
 export interface ServiceSpawnResult {
 	code: number;
 	output: string;
 }
-export type ServiceSpawn = (argv: string[], cwd: string) => Promise<ServiceSpawnResult>;
+export type ServiceSpawn = (argv: string[], cwd: string, timeoutMs?: number) => Promise<ServiceSpawnResult>;
+
+/** Outcome of tearing a service project down. H-5: a failed `down` must BLOCK a green receipt — a
+ *  gate that "passed" while its Postgres is still running has contaminated the host, so the caller
+ *  turns `ok:false` here into a `service-unavailable` refusal rather than swallowing it. */
+export interface ServiceStopResult {
+	ok: boolean;
+	detail?: string;
+}
 
 export interface ServiceHandle {
 	/** The compose project name — also the container name prefix, for an operator hunting strays. */
 	project: string;
 	/** Env the gate command receives so it can reach the services (published host ports). */
 	env: Record<string, string>;
-	/** Idempotent. Always called, including on the refusal paths. */
-	stop(): Promise<void>;
+	/** Idempotent. Always called, including on the refusal paths. `ok:false` ⇒ containers may be
+	 *  alive and the caller must not write a green receipt. */
+	stop(): Promise<ServiceStopResult>;
 }
 
-export type ServiceStart = { ok: true; handle: ServiceHandle } | { ok: false; refusal: GateRefusal; stop: () => Promise<void> };
+export type ServiceStart = { ok: true; handle: ServiceHandle } | { ok: false; refusal: GateRefusal; stop: () => Promise<ServiceStopResult> };
 
-async function realSpawn(argv: string[], cwd: string): Promise<ServiceSpawnResult> {
+/** Default teardown/health ceiling when a gate does not name a tighter one. */
+const DEFAULT_SERVICE_TIMEOUT_MS = 120_000;
+
+async function realSpawn(argv: string[], cwd: string, timeoutMs?: number): Promise<ServiceSpawnResult> {
 	const proc = Bun.spawn(argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-	const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
-	return { code, output: `${out}${err}`.trim() };
+	const timer = timeoutMs ? setTimeout(() => proc.kill(), timeoutMs) : undefined;
+	try {
+		const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+		return { code, output: `${out}${err}`.trim() };
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
 }
 
 /** `serviceName` → an env-var-safe suffix (`test-db` → `TEST_DB`). */
@@ -112,7 +132,8 @@ export async function startGateServices(opts: {
 	tmpDir?: string;
 }): Promise<ServiceStart> {
 	const spawn = opts.spawn ?? realSpawn;
-	const noop = async (): Promise<void> => {};
+	const timeoutMs = opts.timeoutMs > 0 ? opts.timeoutMs : DEFAULT_SERVICE_TIMEOUT_MS;
+	const noop = async (): Promise<ServiceStopResult> => ({ ok: true });
 	if (!opts.services.length) return { ok: true, handle: { project: "", env: {}, stop: noop } };
 
 	const available = await (opts.dockerProbe ? opts.dockerProbe() : dockerAvailable());
@@ -129,18 +150,44 @@ export async function startGateServices(opts: {
 		};
 	}
 
+	// C-4 (gauntlet round 1): temp-dir creation and compose-file writing sit on the local-land path
+	// AFTER main has merged. An EROFS/disk-full throw here used to propagate out of `runManifestGates`
+	// (whose catch did not cover setup) and leave main changed on a *thrown* land. Caught HERE as a
+	// structured refusal so the runner is genuinely total; the land seam additionally restores head0.
 	const project = `glance-gate-${path.basename(opts.cwd).replace(/[^a-z0-9]+/gi, "").toLowerCase().slice(0, 20) || "t"}-${Math.random().toString(36).slice(2, 8)}`;
-	const dir = opts.tmpDir ?? (await fsp.mkdtemp(path.join(os.tmpdir(), "glance-compose-")));
-	const file = path.join(dir, "compose.yaml");
-	await fsp.writeFile(file, composeFileFor(opts.services), "utf8");
+	let dir: string;
+	let file: string;
+	try {
+		dir = opts.tmpDir ?? (await fsp.mkdtemp(path.join(os.tmpdir(), "glance-compose-")));
+		file = path.join(dir, "compose.yaml");
+		await fsp.writeFile(file, composeFileFor(opts.services), "utf8");
+	} catch (e) {
+		return {
+			ok: false,
+			stop: noop,
+			refusal: {
+				code: "service-unavailable",
+				reason: `gate "${opts.gateName}" could not stage its compose project (${errText(e)}) — the daemon host cannot write the service definition; REFUSING to land rather than run the gate without its services.`,
+			},
+		};
+	}
 
-	const down = async (): Promise<void> => {
-		await spawn(["docker", "compose", "-p", project, "-f", file, "down", "-v", "--remove-orphans"], opts.cwd).catch(() => undefined);
+	const down = async (): Promise<ServiceStopResult> => {
+		let result: ServiceStopResult;
+		try {
+			const r = await spawn(["docker", "compose", "-p", project, "-f", file, "down", "-v", "--remove-orphans"], opts.cwd, timeoutMs);
+			// A non-zero `down` (or a killed-on-timeout one) means containers/volumes for `project` may
+			// still be alive — surfaced, never swallowed, so the caller blocks the green receipt (H-5).
+			result = r.code === 0 ? { ok: true } : { ok: false, detail: `compose down for project ${project} exited ${r.code}: ${r.output.slice(0, 300)}` };
+		} catch (e) {
+			result = { ok: false, detail: `compose down for project ${project} threw: ${errText(e)}` };
+		}
 		if (!opts.tmpDir) await fsp.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+		return result;
 	};
 
-	const waitSeconds = Math.max(5, Math.round(opts.timeoutMs / 1000));
-	const up = await spawn(["docker", "compose", "-p", project, "-f", file, "up", "-d", "--wait", "--wait-timeout", String(waitSeconds)], opts.cwd);
+	const waitSeconds = Math.max(5, Math.round(timeoutMs / 1000));
+	const up = await spawn(["docker", "compose", "-p", project, "-f", file, "up", "-d", "--wait", "--wait-timeout", String(waitSeconds)], opts.cwd, timeoutMs + 5_000);
 	if (up.code !== 0) {
 		return {
 			ok: false,

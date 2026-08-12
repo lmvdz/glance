@@ -23,6 +23,7 @@
  */
 
 import { errText } from "./err-text.ts";
+import { gateEnv } from "./gate-env.ts";
 import { execGatedCommand, GateSandboxUnavailableError, dockerAvailable } from "./gate-runner.ts";
 import { startGateServices, type ServiceSpawn } from "./tenant-services.ts";
 import {
@@ -66,7 +67,7 @@ export interface ManifestRunOutcome {
 export type GateCommandRunner = (
 	command: string,
 	cwd: string,
-	opts: { mounts?: string[]; env?: Record<string, string>; policy?: { sandboxStrict?: boolean; sandboxImage?: string; sandboxNetwork?: string }; requireSandbox?: string },
+	opts: { mounts?: string[]; env?: Record<string, string>; policy?: { sandboxStrict?: boolean; sandboxImage?: string; sandboxNetwork?: string }; requireSandbox?: string; timeoutMs?: number },
 ) => Promise<{ code: number; stdout: string; stderr: string; sandboxed: boolean; degraded?: boolean }>;
 
 export interface ManifestRunOpts {
@@ -78,6 +79,23 @@ export interface ManifestRunOpts {
 	exec?: GateCommandRunner;
 	serviceSpawn?: ServiceSpawn;
 	dockerProbe?: () => boolean | Promise<boolean>;
+	/** Ensure `image` is present on the host, pulling if needed (H-2). Returns false ⇒ unpullable ⇒
+	 *  `runner-unavailable`. Injected in tests; production probes docker. */
+	ensureImage?: (image: string) => Promise<boolean>;
+}
+
+/** Default runner-image provisioning: present already, else one `docker pull`. Missing image with no
+ *  registry access ⇒ false ⇒ the gate refuses `runner-unavailable` rather than silently running in the
+ *  wrong (default/bun) image (H-2). Never throws. */
+async function ensureImagePresent(image: string): Promise<boolean> {
+	try {
+		const inspect = Bun.spawn(["docker", "image", "inspect", image], { stdout: "ignore", stderr: "ignore" });
+		if ((await inspect.exited) === 0) return true;
+		const pull = Bun.spawn(["docker", "pull", image], { stdout: "ignore", stderr: "ignore" });
+		return (await pull.exited) === 0;
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -96,9 +114,13 @@ export function missingCommandRefusal(repo: string, detail: string): GateRefusal
 const MAX_OUTPUT = 8000;
 
 /**
- * Execute the manifest. Never throws: a thrown sandbox refusal (docker absent under a strict
- * policy) is caught and returned as a refusal, because a throw at this seam would surface to the
- * land paths as an unclassified error rather than a reason an operator can act on.
+ * Execute the manifest. TRULY never throws (C-4, gauntlet round 1): the sandbox refusal, the compose
+ * setup (temp-dir/compose-file — moved inside `startGateServices`'s own catch), the runner-image
+ * probe, and the gate evaluation are each caught and returned as a structured refusal. A throw at
+ * this seam surfaces to the land paths as an unclassified error on an already-merged local main — the
+ * land layer additionally restores head0 on any refusal, but the runner must never be the thing that
+ * throws. The loop below is wrapped as a last-ditch belt so even an unforeseen escape becomes a
+ * refusal, never an exception.
  */
 export async function runManifestGates(opts: ManifestRunOpts): Promise<ManifestRunOutcome> {
 	const exec: GateCommandRunner = opts.exec ?? execGatedCommand;
@@ -114,7 +136,9 @@ export async function runManifestGates(opts: ManifestRunOpts): Promise<ManifestR
 	for (let i = 0; i < opts.manifest.gates.length; i++) {
 		const gate = opts.manifest.gates[i]!;
 		const started = Date.now();
-		const outcome = await runOneGate(gate, policy, opts, exec);
+		const outcome = await runOneGate(gate, policy, opts, exec).catch(
+			(e: unknown): OneGateOutcome => ({ code: null, output: "", refusal: { code: "service-unavailable", reason: `gate "${gate.name}" runner threw before it could judge (${errText(e)}) — treated as a refusal, never a silent pass` } }),
+		);
 		chunks.push(outcome.output);
 		results.push({
 			name: gate.name,
@@ -158,27 +182,28 @@ async function runOneGate(
 	exec: GateCommandRunner,
 ): Promise<OneGateOutcome> {
 	const cwd = gate.cwd ? path.resolve(opts.cwd, gate.cwd) : opts.cwd;
+	const refuse = (code: GateRefusal["code"], reason: string): OneGateOutcome => ({ code: null, output: "", refusal: { code, reason } });
 
 	// R4 — a declared runner this host cannot provide. Checked BEFORE anything starts, so a gate that
-	// can never run does not first spin up a Postgres. Playwright provisioning is deliberately not
-	// implemented (G2 #386's omission list): a browser gate declares `runnerImage` and refuses here
-	// rather than fetching browsers at gate time, which is the honest fail-closed state.
+	// can never run does not first spin up a Postgres. H-2 (round 1): the declared image must become the
+	// ACTUAL sandbox image the gate runs in — a docker-presence probe alone let a Playwright gate "pass"
+	// in the bun image with the declared image absent. Present-or-pullable, else `runner-unavailable`.
+	let gatePolicy = policy;
 	if (gate.requires?.runnerImage) {
 		const available = await (opts.dockerProbe ? opts.dockerProbe() : dockerAvailable());
 		if (!available) {
-			return {
-				code: null,
-				output: "",
-				refusal: {
-					code: "runner-unavailable",
-					reason: `gate "${gate.name}" declares runnerImage "${gate.requires.runnerImage}" and docker is unavailable — this gate has no runner on this host, so its result would be no result. Refusing to land.`,
-				},
-			};
+			return refuse("runner-unavailable", `gate "${gate.name}" declares runnerImage "${gate.requires.runnerImage}" and docker is unavailable — this gate has no runner on this host, so its result would be no result. Refusing to land.`);
 		}
+		const present = await (opts.ensureImage ?? ensureImagePresent)(gate.requires.runnerImage);
+		if (!present) {
+			return refuse("runner-unavailable", `gate "${gate.name}" declares runnerImage "${gate.requires.runnerImage}" which is not present and could not be pulled — refusing to run the gate in a different image than it demands.`);
+		}
+		// Override the sandbox image for THIS gate: it runs in the image it declared, not the default.
+		gatePolicy = { ...policy, sandboxImage: gate.requires.runnerImage };
 	}
 
-	// R3 — required services. Fail-closed on docker absence, on a failed `up`, and on a healthcheck
-	// that never goes green; the handle's `stop` runs on every path below.
+	// R3 — required services. Fail-closed on docker absence, on a failed `up`, on a healthcheck that
+	// never goes green, and (C-4) on a setup throw — all now structured refusals, never exceptions.
 	const services = await startGateServices({
 		services: gate.requires?.services ?? [],
 		gateName: gate.name,
@@ -193,7 +218,11 @@ async function runOneGate(
 	}
 	const stopServices = services.handle.stop;
 
-	try {
+	// The gate runs, then teardown, then service `down` — none in a `finally`, because a failed `down`
+	// must be able to turn a GREEN gate into a refusal (a gate that "passed" with its Postgres still
+	// running has contaminated the host — H-5). `runGate` computes the gate's own outcome; teardown and
+	// `down` run unconditionally afterward.
+	const runGate = async (): Promise<OneGateOutcome> => {
 		const requireSandbox = gate.requires?.services?.length
 			? `gate "${gate.name}" requires composed services`
 			: gate.requires?.runnerImage
@@ -203,27 +232,40 @@ async function runOneGate(
 		try {
 			run = await exec(gate.command, cwd, {
 				mounts: opts.mounts,
-				policy,
+				policy: gatePolicy,
 				requireSandbox,
-				...(Object.keys(services.handle.env).length ? { env: { ...process.env, ...services.handle.env } as Record<string, string> } : {}),
+				timeoutMs: gate.timeoutMs,
+				// H-1 (SECURITY, round 1): merge service vars INTO gateEnv's scrub — never over raw
+				// process.env. The old `{...process.env, ...serviceEnv}` REPLACED the scrub, handing
+				// agent-authored tenant tests the daemon's DATABASE_URL / *_API_KEY / OMP_SQUAD_* inside
+				// the container — the exact host-DB fall-through the module claims to refuse. gateEnv
+				// already runs for the no-service path (inside gateExec); this makes the service path use
+				// the SAME scrubbed base, then layers only the GLANCE_SERVICE_* discovery vars on top.
+				...(Object.keys(services.handle.env).length ? { env: { ...gateEnv(process.env), ...services.handle.env } } : {}),
 			});
 		} catch (e) {
 			// A strict-policy sandbox refusal. Returned as a refusal rather than rethrown: the land paths
 			// need a reason string, not a stack.
-			if (e instanceof GateSandboxUnavailableError) {
-				return { code: null, output: "", refusal: { code: "runner-unavailable", reason: `gate "${gate.name}" could not run hermetically: ${e.message}` } };
-			}
-			return { code: null, output: "", refusal: { code: "runner-unavailable", reason: `gate "${gate.name}" could not be launched: ${errText(e)}` } };
+			if (e instanceof GateSandboxUnavailableError) return refuse("runner-unavailable", `gate "${gate.name}" could not run hermetically: ${e.message}`);
+			return refuse("runner-unavailable", `gate "${gate.name}" could not be launched: ${errText(e)}`);
 		}
 		const output = `${run.stdout}${run.stderr}`.trim();
 		const evidence = readGateEvidence(gate.expects.parser, output);
 		const refusal = evaluateGateRun(gate, { code: run.code, output, degraded: run.degraded });
 		return { code: run.code, output: `[gate ${gate.name}] ${output}`, sandboxed: run.sandboxed, evidence, refusal };
-	} finally {
-		// The gate's own teardown first (it may need the services), then the services themselves.
-		// Both best-effort: a failed teardown must not turn a green land red, but it must not be
-		// silently skipped either — the compose `down` is what keeps the host clean.
-		if (gate.teardown) await exec(gate.teardown, cwd, { mounts: opts.mounts, policy }).catch(() => undefined);
-		await stopServices().catch(() => undefined);
+	};
+
+	let outcome = await runGate().catch((e: unknown) => refuse("runner-unavailable", `gate "${gate.name}" threw during evaluation: ${errText(e)}`));
+
+	// Teardown (the tenant's own cleanup shell) — bounded, best-effort: a non-zero teardown is the
+	// tenant's problem to notice, not grounds to fail an otherwise-green gate.
+	if (gate.teardown) await exec(gate.teardown, cwd, { mounts: opts.mounts, policy: gatePolicy, timeoutMs: gate.timeoutMs }).catch(() => undefined);
+	// Service `down` — its failure DOES block a green receipt (H-5). If the gate already refused, keep
+	// that (more specific) refusal; if it passed but `down` failed, the pass becomes a service-unavailable
+	// refusal so a human deals with the live containers instead of the receipt hiding them.
+	const stopped = await stopServices();
+	if (!stopped.ok && !outcome.refusal) {
+		outcome = { ...outcome, refusal: { code: "service-unavailable", reason: `gate "${gate.name}" passed but its service teardown did not complete (${stopped.detail ?? "unknown"}) — refusing the green receipt while containers may still be running on the host.` } };
 	}
+	return outcome;
 }

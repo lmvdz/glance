@@ -65,9 +65,21 @@ describe("R2 — count violated (the Vitest --passWithNoTests killer)", () => {
 		expect(out.refusal?.reason).not.toBe((await runManifestGates({ manifest: contract([testGate]), cwd: "/wt", exec: fakeExec({ code: 0, stdout: "No test files found" }), dockerProbe: hasDocker })).refusal?.reason);
 	});
 
-	test("the same run under a contract that demands nothing PASSES — the count is doing the work", async () => {
+	test("H-3: a test parser requires positive evidence even with NO explicit minTests — an empty run refuses", async () => {
+		// Declaring `parser: "vitest"` IS the declaration "this gate runs tests"; an empty run under it
+		// is a fail-open, not a pass. Before round 2 this same lax contract passed on "No test files".
 		const lax = contract([{ ...testGate, expects: { exit: 0, parser: "vitest" } }]);
-		const out = await runManifestGates({ manifest: lax, cwd: "/wt", exec: fakeExec({ code: 0, stdout: "No test files found" }), dockerProbe: hasDocker });
+		const empty = await runManifestGates({ manifest: lax, cwd: "/wt", exec: fakeExec({ code: 0, stdout: "No test files found" }), dockerProbe: hasDocker });
+		expect(empty.ok).toBe(false);
+		expect(empty.refusal?.code).toBe("zero-tests");
+		// A run that DID execute tests passes the same lax contract — the implicit floor is 1, not N.
+		const ran = await runManifestGates({ manifest: lax, cwd: "/wt", exec: fakeExec({ code: 0, stdout: " Tests  3 passed (3)\n" }), dockerProbe: hasDocker });
+		expect(ran.ok).toBe(true);
+	});
+
+	test("H-3: `raw` opts OUT of positive-evidence — an exit-0 raw gate with no output passes", async () => {
+		const raw = contract([{ name: "lint", command: "biome ci", timeoutMs: 1000, expects: { exit: 0, parser: "raw" } }]);
+		const out = await runManifestGates({ manifest: raw, cwd: "/wt", exec: fakeExec({ code: 0, stdout: "" }), dockerProbe: hasDocker });
 		expect(out.ok).toBe(true);
 	});
 });
@@ -245,5 +257,121 @@ describe("cross-cutting runner behavior", () => {
 			dockerProbe: hasDocker,
 		});
 		expect(seen).toEqual(["pnpm test", "pnpm clean"]);
+	});
+});
+
+// ── Round 2 hardening (gauntlet round 1 High findings) ───────────────────────────────────────────
+
+const serviceGate: TenantGate = {
+	name: "integration",
+	command: "pnpm test:integration",
+	timeoutMs: 1000,
+	expects: { exit: 0, parser: "raw" },
+	requires: { services: [{ name: "db", image: "postgres:16", healthcheckCommand: "pg_isready -U postgres", ports: ["55432:5432"], env: { POSTGRES_PASSWORD: "x" } }] },
+};
+
+describe("H-1 (SECURITY) — service gates receive gateEnv's SCRUB, not the raw daemon env", () => {
+	test("FLIP: a secret in the daemon env is ABSENT from the gate's env; only GLANCE_SERVICE_* is added", async () => {
+		const saved = { canary: process.env.CANARY_SECRET, db: process.env.DATABASE_URL };
+		process.env.CANARY_SECRET = "leak-me"; // matches gateEnv's SECRET_NAME shape → must be scrubbed
+		process.env.DATABASE_URL = "postgres://daemon-secret"; // the exact host-DB fall-through H-1 names
+		try {
+			let captured: Record<string, string> | undefined;
+			await runManifestGates({
+				manifest: contract([serviceGate]),
+				cwd: "/wt",
+				dockerProbe: hasDocker,
+				serviceSpawn: async () => ({ code: 0, output: "" }),
+				exec: async (_c, _cwd, o) => {
+					captured = o.env;
+					return { code: 0, stdout: "", stderr: "", sandboxed: true };
+				},
+			});
+			expect(captured).toBeDefined();
+			// The canary and DATABASE_URL — anything a tenant test could read to reach the daemon's DB —
+			// are gone. The old `{...process.env, ...serviceEnv}` would have kept both.
+			expect(captured?.CANARY_SECRET).toBeUndefined();
+			expect(captured?.DATABASE_URL).toBeUndefined();
+			// Only the service-discovery vars the rail can prove it published are added.
+			expect(captured?.GLANCE_SERVICE_DB_HOST).toBe("127.0.0.1");
+			expect(captured?.GLANCE_SERVICE_DB_PORT).toBe("55432");
+		} finally {
+			if (saved.canary === undefined) delete process.env.CANARY_SECRET; else process.env.CANARY_SECRET = saved.canary;
+			if (saved.db === undefined) delete process.env.DATABASE_URL; else process.env.DATABASE_URL = saved.db;
+		}
+	});
+});
+
+describe("H-2 — runnerImage becomes the ACTUAL sandbox image, or runner-unavailable", () => {
+	const browserGate: TenantGate = { name: "e2e", command: "pnpm e2e", timeoutMs: 1000, expects: { exit: 0, parser: "raw" }, requires: { runnerImage: "mcr.microsoft.com/playwright:v1.50.0" } };
+
+	test("a present/pullable image is PASSED to the exec as sandboxImage — the gate runs in it, not the default", async () => {
+		let captured: { policy?: { sandboxImage?: string } } | undefined;
+		const out = await runManifestGates({
+			manifest: contract([browserGate]),
+			cwd: "/wt",
+			dockerProbe: hasDocker,
+			ensureImage: async () => true, // present/pulled
+			exec: async (_c, _cwd, o) => {
+				captured = o;
+				return { code: 0, stdout: "", stderr: "", sandboxed: true };
+			},
+		});
+		expect(out.ok).toBe(true);
+		expect(captured?.policy?.sandboxImage).toBe("mcr.microsoft.com/playwright:v1.50.0");
+	});
+
+	test("FLIP: an unpullable image REFUSES runner-unavailable — the gate never runs in the wrong image", async () => {
+		const seen: string[] = [];
+		const out = await runManifestGates({
+			manifest: contract([browserGate]),
+			cwd: "/wt",
+			dockerProbe: hasDocker,
+			ensureImage: async () => false, // absent + pull failed
+			exec: fakeExec({ code: 0 }, seen),
+		});
+		expect(out.refusal?.code).toBe("runner-unavailable");
+		expect(out.refusal?.reason).toContain("could not be pulled");
+		expect(seen).toHaveLength(0);
+	});
+});
+
+describe("H-4 — a missing binary is environmental/retryable, never a permanent gate-red wedge", () => {
+	test("FLIP: exit 127 refuses command-unregistered (which land classifies retryable), not gate-red", async () => {
+		const out = await runManifestGates({ manifest: contract([{ ...testGate, expects: { exit: 0, parser: "raw" } }]), cwd: "/wt", exec: fakeExec({ code: 127, stderr: "pnpm: command not found" }), dockerProbe: hasDocker });
+		expect(out.refusal?.code).toBe("command-unregistered");
+		expect(out.refusal?.code).not.toBe("gate-red");
+	});
+
+	test("a non-127 exit whose output shows an executable-resolution failure is also environmental", async () => {
+		const out = await runManifestGates({ manifest: contract([{ ...testGate, expects: { exit: 0, parser: "raw" } }]), cwd: "/wt", exec: fakeExec({ code: 1, stderr: "Executable not found in $PATH: vitest" }), dockerProbe: hasDocker });
+		expect(out.refusal?.code).toBe("command-unregistered");
+	});
+});
+
+describe("H-5 — a failed `down` blocks the GREEN receipt (containers alive ≠ a pass)", () => {
+	test("FLIP: gate passes but compose `down` fails → the pass becomes a service-unavailable refusal", async () => {
+		const out = await runManifestGates({
+			manifest: contract([serviceGate]),
+			cwd: "/wt",
+			dockerProbe: hasDocker,
+			// up succeeds, down fails — containers may still be running.
+			serviceSpawn: async (argv) => (argv.includes("down") ? { code: 1, output: "Error response from daemon: conflict" } : { code: 0, output: "" }),
+			exec: async () => ({ code: 0, stdout: "", stderr: "", sandboxed: true }),
+		});
+		expect(out.ok).toBe(false);
+		expect(out.refusal?.code).toBe("service-unavailable");
+		expect(out.refusal?.reason).toContain("teardown did not complete");
+	});
+
+	test("a clean `down` after a green gate lands normally", async () => {
+		const out = await runManifestGates({
+			manifest: contract([serviceGate]),
+			cwd: "/wt",
+			dockerProbe: hasDocker,
+			serviceSpawn: async () => ({ code: 0, output: "" }),
+			exec: async () => ({ code: 0, stdout: "", stderr: "", sandboxed: true }),
+		});
+		expect(out.ok).toBe(true);
 	});
 });

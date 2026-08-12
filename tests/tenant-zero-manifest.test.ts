@@ -92,6 +92,39 @@ describe("glance's own gate contract", () => {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
+
+	// C-2 (gauntlet round 1): whole-FILE corruption must fail closed for EVERY repo, not silently
+	// unregister the org to detection/skipped-green.
+	test("C-2: a corrupt registry FILE is a registry-unreadable error for any repo, and readError() fires", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "tenant-corrupt-"));
+		try {
+			await fs.writeFile(path.join(dir, "tenant-gates.json"), "{ this is not json");
+			const registry = openTenantGateRegistry(dir);
+			expect(registry.readError()).toBeDefined();
+			// A repo that was never even mentioned in the (corrupt) file still refuses — the registry
+			// cannot prove it is un-gated, so it is not silently "unregistered".
+			const found = registry.get("/any/repo");
+			expect(found && "error" in found && found.error).toContain("unreadable");
+			expect(registry.repos()).toEqual([]); // cannot enumerate a corrupt file
+			// register/unregister refuse to clobber a corrupt file blind — a human must see it.
+			expect(registry.register({ version: 1, repo: "/x", gates: [{ name: "t", command: "true", timeoutMs: 1, expects: { exit: 0, parser: "raw" } }] })).toBe("error");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("C-2: an ABSENT or empty registry file is honest 'unregistered', not an error", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "tenant-empty-"));
+		try {
+			const registry = openTenantGateRegistry(dir);
+			expect(registry.readError()).toBeUndefined(); // absent ⇒ nothing registered, not corrupt
+			expect(registry.get("/any/repo")).toBeUndefined();
+			await fs.writeFile(path.join(dir, "tenant-gates.json"), "   \n");
+			expect(openTenantGateRegistry(dir).readError()).toBeUndefined(); // empty/whitespace ⇒ same
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("a real land runs through the manifest path, with counts in the receipt", () => {

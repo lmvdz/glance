@@ -124,4 +124,18 @@ describe("the Observer's main gate under a contract", () => {
 		const r = await m.gate(repo);
 		expect(r).toMatchObject({ ok: true, skipped: true });
 	}, 60_000);
+
+	test("C-2: a corrupt registry FILE makes the observer gate refuse for EVERY repo, not fall to skipped-green", async () => {
+		const repo = await tmp("tenant-wire-repo-");
+		await Bun.spawn(["git", "init", "-q"], { cwd: repo, stdout: "ignore", stderr: "ignore" }).exited;
+		const stateDir = await tmp("tenant-wire-state-");
+		await fs.writeFile(path.join(stateDir, "tenant-gates.json"), "{ corrupt");
+		const m = new WiringManager({ stateDir });
+		// `contractFor` surfaces the file-level error; the observer gate refuses (unrunnable), never the
+		// `{ ok:true, skipped:true }` fall-through a whole-file catch used to produce.
+		expect(m.contractFor(repo).error).toBeDefined();
+		const r = await m.gate(repo);
+		expect(r.ok).toBe(false);
+		expect(r.unrunnable).toBe(true);
+	}, 60_000);
 });

@@ -389,16 +389,26 @@ export async function execGatedCommand(
 		hostArgv?: string[];
 		policy?: { sandboxStrict?: boolean; sandboxImage?: string; sandboxNetwork?: string };
 		requireSandbox?: string;
+		/** Wall-clock ceiling; the gate child is killed if it exceeds it (H-5, glance#393). A killed
+		 *  gate surfaces as a non-zero exit, which fails closed. Omitted ⇒ no timeout (legacy callers). */
+		timeoutMs?: number;
 	} = {},
 ): Promise<{ code: number; stdout: string; stderr: string; sandboxed: boolean; degraded?: boolean }> {
 	const plan = await gateExec(command, cwd, { mounts: opts.mounts, env: opts.env, network: opts.network, hostArgv: opts.hostArgv, policy: opts.policy, requireSandbox: opts.requireSandbox });
 	const proc = Bun.spawn(plan.argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: plan.env });
-	const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-	// R2 #384 fail-open #3: this used to return only code/stdout/stderr, so BOTH its consumers (the
-	// workflow verify node and the Observer's main gate) were structurally incapable of noticing that
-	// the run happened in a degraded bare-base sandbox — a classification `gateRunUnrunnable` was
-	// already able to make, on evidence that never reached it.
-	return { code: await proc.exited, stdout, stderr, sandboxed: plan.sandboxed, degraded: plan.degraded };
+	let timedOut = false;
+	const timer = opts.timeoutMs && opts.timeoutMs > 0 ? setTimeout(() => { timedOut = true; proc.kill(); }, opts.timeoutMs) : undefined;
+	try {
+		const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+		const code = await proc.exited;
+		// R2 #384 fail-open #3: this used to return only code/stdout/stderr, so BOTH its consumers (the
+		// workflow verify node and the Observer's main gate) were structurally incapable of noticing that
+		// the run happened in a degraded bare-base sandbox — a classification `gateRunUnrunnable` was
+		// already able to make, on evidence that never reached it.
+		return { code: timedOut ? (code === 0 ? 124 : code) : code, stdout, stderr: timedOut ? `${stderr}\n[gate] killed after ${opts.timeoutMs}ms timeout` : stderr, sandboxed: plan.sandboxed, degraded: plan.degraded };
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
 }
 
 // ── Unrunnable-gate classifier ─────────────────────────────────────────────────────────────────

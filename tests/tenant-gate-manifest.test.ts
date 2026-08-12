@@ -60,6 +60,11 @@ describe("schema", () => {
 		const r = decodeTenantGateManifest(manifest([okGate, { ...okGate }]));
 		expect("error" in r && r.error).toContain("duplicate gate name");
 	});
+
+	test("H-4: expects.exit other than 0 is a DECODE ERROR — fail-closed has one passing exit code", () => {
+		const r = decodeTenantGateManifest(manifest([{ name: "t", command: "x", timeoutMs: 1, expects: { exit: 1, parser: "raw" } }]));
+		expect("error" in r && r.error).toContain("only exit 0");
+	});
 });
 
 describe("identity", () => {
@@ -104,10 +109,28 @@ describe("parser-aware evidence", () => {
 		expect(readGateEvidence("bun-test", "some unrelated output").tests).toBeUndefined();
 	});
 
-	test("vitest: parenthesised total, segment sum, and --passWithNoTests as ZERO", () => {
+	test("vitest: passed+failed only, and --passWithNoTests as ZERO", () => {
 		expect(readGateEvidence("vitest", "\n Tests  1 failed | 11 passed (12)\n").tests).toBe(12);
 		expect(readGateEvidence("vitest", "\n Tests  7 passed\n").tests).toBe(7);
 		expect(readGateEvidence("vitest", "No test files found, exiting with code 0").tests).toBe(0);
+	});
+
+	test("H-3: vitest EXCLUDES skipped/todo — 'Tests 2 skipped' ran nothing, not 2", () => {
+		// The `(N)` total folds skipped in; counting it would let a suite that ran nothing pass minTests.
+		expect(readGateEvidence("vitest", "\n Tests  2 skipped (2)\n").tests).toBe(0);
+		expect(readGateEvidence("vitest", "\n Tests  1 failed | 9 passed | 3 skipped (13)\n").tests).toBe(10);
+		expect(readGateEvidence("vitest", "\n Tests  5 passed | 2 todo (7)\n").tests).toBe(5);
+	});
+
+	test("H-3: zero-markers are read BEFORE any positive line — a stale 'passed' does not win", () => {
+		// A run that ultimately found no test files but whose scrollback carries an earlier summary must
+		// read as ZERO, not as the stale number.
+		expect(readGateEvidence("vitest", " Tests  3 passed (3)\n...\nNo test files found, exiting with code 0\n").tests).toBe(0);
+		expect(readGateEvidence("bun-test", " 3 pass\n...\nRan 0 tests across 0 files.\n").tests).toBe(0);
+	});
+
+	test("H-3: bun-test excludes skip — '2 skip' is not counted as ran", () => {
+		expect(readGateEvidence("bun-test", " 5 pass\n 2 skip\n 1 fail\n").tests).toBe(6);
 	});
 
 	test("counts-script: named counts from `name=n` / `name: n` lines", () => {
@@ -129,6 +152,21 @@ describe("evaluateGateRun — one row per way a contract can be broken", () => {
 
 	test("non-zero exit → gate-red", () => {
 		expect(evaluateGateRun(gate, { code: 1, output: " 9 pass\n" })?.code).toBe("gate-red");
+	});
+
+	test("H-4: exit 127 (missing binary) → command-unregistered (environmental), NOT gate-red", () => {
+		expect(evaluateGateRun(gate, { code: 127, output: "vitest: not found" })?.code).toBe("command-unregistered");
+		// A non-127 exit whose output shows an executable-resolution failure is classed the same way.
+		expect(evaluateGateRun(gate, { code: 1, output: "Executable not found in $PATH: vitest" })?.code).toBe("command-unregistered");
+	});
+
+	test("H-3: a bun-test/vitest gate with NO explicit minTests still requires positive evidence", () => {
+		const noFloor: TenantGate = { name: "unit", command: "vitest", timeoutMs: 1, expects: { exit: 0, parser: "vitest" } };
+		expect(evaluateGateRun(noFloor, { code: 0, output: "No test files found" })?.code).toBe("zero-tests");
+		expect(evaluateGateRun(noFloor, { code: 0, output: " Tests  1 passed (1)\n" })).toBeUndefined();
+		// `raw` opts out — its exit code is the whole assertion.
+		const raw: TenantGate = { name: "lint", command: "biome ci", timeoutMs: 1, expects: { exit: 0, parser: "raw" } };
+		expect(evaluateGateRun(raw, { code: 0, output: "" })).toBeUndefined();
 	});
 
 	test("exit 0 having run ZERO tests → zero-tests (not gate-red, not a pass)", () => {

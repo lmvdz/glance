@@ -23,6 +23,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Result, Schema } from "effect";
 import { getStorageBackend } from "./dal/storage.ts";
+import { errText } from "./err-text.ts";
 import { normalizeRepoPath } from "./project-registry.ts";
 import { decodeTenantGateManifest, type TenantGateManifest } from "./tenant-gates.ts";
 
@@ -45,8 +46,13 @@ export type ManifestLookup = { manifest: TenantGateManifest } | { error: string 
 export interface TenantGateRegistry {
 	/** The registered contract for `repo`, a decode error, or undefined when unregistered. */
 	get(repo: string): ManifestLookup;
-	/** Registered repo roots, sorted. Never throws. */
+	/** Registered repo roots, sorted. `[]` when the file is absent OR unreadable — pair with
+	 *  {@link readError} to tell the two apart. */
 	repos(): string[];
+	/** Non-undefined ⇒ the registry FILE itself is corrupt/unreadable (C-2): every land must refuse
+	 *  and the doctor must error, because a registry that cannot be read cannot prove any repo is
+	 *  un-gated. Undefined ⇒ the file is absent or decodes whole. */
+	readError(): string | undefined;
 	/** Idempotent overwrite. `"error"` ⇒ nothing was persisted. */
 	register(manifest: TenantGateManifest): "registered" | "invalid" | "error";
 	unregister(repo: string): "removed" | "absent" | "error";
@@ -54,18 +60,33 @@ export interface TenantGateRegistry {
 	file(): string;
 }
 
-function readAll(file: string): Record<string, unknown> {
+/** The whole-file read, as a discriminated result. C-2 (gauntlet round 1): an absent file is
+ *  "nothing registered" (`ok`, empty), but a PRESENT-but-broken file is `ok:false` — NOT silently
+ *  collapsed to empty, because that dropped an entire org to detection/skipped-green on one bad byte
+ *  while the doctor still rendered "ok". Per-RECORD corruption still fails closed inside `get`; this
+ *  is the file-level counterpart. */
+type RegistryReadState = { ok: true; records: Record<string, unknown> } | { ok: false; error: string };
+
+function readState(file: string): RegistryReadState {
+	let raw: string | undefined;
 	try {
 		const b = getStorageBackend();
-		if (!b.exists(file)) return {};
-		const raw = b.readTextSync(file);
-		if (raw === undefined) return {};
-		const parsed: unknown = JSON.parse(raw);
-		const decoded = decodeStored(parsed);
-		return Result.isSuccess(decoded) ? { ...decoded.success } : {};
-	} catch {
-		return {}; // unreadable file ⇒ nothing registered; individual bad RECORDS still surface via get()
+		if (!b.exists(file)) return { ok: true, records: {} };
+		raw = b.readTextSync(file);
+	} catch (e) {
+		// An IO error reading a file that EXISTS is not "unregistered" — it is "unknowable", fail closed.
+		return { ok: false, error: `could not read ${file}: ${errText(e)}` };
 	}
+	if (raw === undefined || raw.trim() === "") return { ok: true, records: {} }; // absent/empty ⇒ nothing registered
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return { ok: false, error: `${file} is not valid JSON` };
+	}
+	const decoded = decodeStored(parsed);
+	if (!Result.isSuccess(decoded)) return { ok: false, error: `${file} is not a {repo: manifest} object` };
+	return { ok: true, records: { ...decoded.success } };
 }
 
 function writeAll(file: string, all: Record<string, unknown>): boolean {
@@ -84,9 +105,17 @@ export function openTenantGateRegistry(stateDir: string): TenantGateRegistry {
 		file() {
 			return file;
 		},
+		readError() {
+			const state = readState(file);
+			return state.ok ? undefined : state.error;
+		},
 		get(repo) {
 			const key = normalizeRepoPath(repo);
-			const raw = readAll(file)[key];
+			const state = readState(file);
+			// C-2: a corrupt registry FILE fails closed for EVERY repo — a registry we cannot read cannot
+			// prove this repo is un-gated, so it is a refusal at land time, never a silent "unregistered".
+			if (!state.ok) return { error: `tenant gate registry unreadable (${state.error}) — refusing every land until it is repaired; a corrupt registry cannot prove a repo is un-gated (fail-closed)` };
+			const raw = state.records[key];
 			if (raw === undefined) return undefined;
 			const decoded = decodeTenantGateManifest(raw);
 			if ("error" in decoded) return { error: `registered manifest for ${key} is unusable: ${decoded.error}` };
@@ -98,20 +127,27 @@ export function openTenantGateRegistry(stateDir: string): TenantGateRegistry {
 			return decoded;
 		},
 		repos() {
-			return Object.keys(readAll(file)).sort();
+			const state = readState(file);
+			return state.ok ? Object.keys(state.records).sort() : [];
 		},
 		register(manifest) {
 			const key = normalizeRepoPath(manifest.repo);
 			if (!key) return "invalid";
 			const check = decodeTenantGateManifest(manifest);
 			if ("error" in check) return "invalid";
-			const all = readAll(file);
+			const state = readState(file);
+			// Never overwrite a corrupt file blind — a human must SEE the corruption and repair it, not
+			// have a registration silently clobber the (possibly recoverable) bad bytes.
+			if (!state.ok) return "error";
+			const all = state.records;
 			all[key] = { ...manifest, repo: key };
 			return writeAll(file, all) ? "registered" : "error";
 		},
 		unregister(repo) {
 			const key = normalizeRepoPath(repo);
-			const all = readAll(file);
+			const state = readState(file);
+			if (!state.ok) return "error";
+			const all = state.records;
 			if (!(key in all)) return "absent";
 			delete all[key];
 			return writeAll(file, all) ? "removed" : "error";

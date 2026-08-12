@@ -396,6 +396,11 @@ async function tenantGateChecks(probe: DoctorProbe): Promise<DoctorCheck[]> {
 	const s = await probe.stateDir();
 	if (!s.exists) return [{ id: "tenant.gates", title: "Are the gates declared, or guessed?", status: "warn", detail: "no state dir yet — nothing can be registered until the daemon has booted once" }];
 	const registry = openTenantGateRegistry(s.path);
+	// C-2 (gauntlet round 1): a corrupt registry FILE is a loud error surfaced BEFORE any per-project
+	// row — even with zero projects — because it fails every land closed until repaired, and the whole
+	// point of the finding is that this was previously invisible ("ok — gated by DETECTION").
+	const readError = registry.readError();
+	if (readError) return [{ id: "tenant.gates", title: "Are the gates declared, or guessed?", status: "error", detail: `tenant gate registry is unreadable — every land refuses until repaired: ${readError}`, remedy: `repair or delete ${registry.file()}` }];
 	const projects = await probe.projects();
 	if (projects.length === 0) return [{ id: "tenant.gates", title: "Are the gates declared, or guessed?", status: "warn", detail: `no projects registered; gate contracts would live in ${registry.file()}` }];
 	const checks: DoctorCheck[] = [];
