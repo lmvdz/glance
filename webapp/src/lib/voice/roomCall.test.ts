@@ -1,16 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 import {
   ALL_AGENTS,
-  IDLE_HANGUP_MS,
-  IDLE_WARNING_MS,
   PHASE_LABEL,
-  PHASE_LABEL_CH,
   artifactAgent,
   artifactAgentOptions,
   artifactEmptyCopy,
   artifactStateCopy,
   attentionChipLabel,
-  bindingBanner,
   browserAudioStatusLine,
   callPhase,
   callRowMicState,
@@ -26,13 +22,11 @@ import {
   endedUnexpectedly,
   focusHudRegion,
   groupArtifacts,
-  idlePolicyLine,
   initialPaneStack,
   isCallConflictError,
   isRawRoomEvent,
   isUiOnlyDecision,
   optionLabelWithoutMarker,
-  phaseExplanation,
   popPane,
   pushPane,
   readResolveAck,
@@ -152,14 +146,6 @@ describe('epistemic register', () => {
 // -------------------------------------------------------------------------------------------------
 
 describe('call phase chrome', () => {
-  test('the reserved width fits every phase label, so the chrome is fixed-size', () => {
-    for (const label of Object.values(PHASE_LABEL)) expect(label.length).toBeLessThanOrEqual(PHASE_LABEL_CH);
-  });
-
-  test('a degraded call says the socket dropped, not that everything is fine', () => {
-    expect(phaseExplanation(binding({ state: 'degraded' }))).toContain('socket');
-  });
-
   test('each terminal reason gets its own honest sentence', () => {
     expect(terminalReasonCopy('operator-ended')).toContain('You ended');
     expect(terminalReasonCopy('journal-end')).toContain('crashed');
@@ -167,14 +153,6 @@ describe('call phase chrome', () => {
     expect(terminalReasonCopy('terminal', 'boom')).toContain('boom');
   });
 
-  test('the binding banner names the call and the PINNED session, and invents neither', () => {
-    // After a reload this is what proves the call on screen is the call that was started rather
-    // than a stranger that inherited the port.
-    expect(bindingBanner(binding({ callId: 'call-9', sessionId: 'sess-7' }))).toBe('call call-9 · session sess-7');
-    expect(bindingBanner(binding({ callId: 'call-9', sessionId: undefined }))).toContain('not pinned yet');
-    expect(bindingBanner(binding({ callId: undefined }))).toBeUndefined();
-    expect(bindingBanner(null)).toBeUndefined();
-  });
 
   test('only an unchosen ending counts as unexpected', () => {
     expect(endedUnexpectedly(binding({ state: 'ended', terminalReason: 'operator-ended' }))).toBe(false);
@@ -215,28 +193,6 @@ describe('recording and retention, visible at call start', () => {
     expect(notice.detail).toContain('"tails"');
   });
 });
-
-describe('idle policy (concern 05: 10 minutes, spoken warning at nine)', () => {
-  test('states the policy when the call is fresh', () => {
-    expect(idlePolicyLine(undefined, 0)).toContain('10 minutes');
-    expect(idlePolicyLine(1_000, 1_000)).toContain('spoken warning');
-  });
-
-  test('counts down once the room has actually gone quiet', () => {
-    const line = idlePolicyLine(0, 4 * 60_000);
-    expect(line).toContain('Quiet for 4 minutes');
-    expect(line).toContain('6 minutes');
-  });
-
-  test('names the spoken warning at the nine-minute mark', () => {
-    expect(idlePolicyLine(0, IDLE_WARNING_MS)).toContain('nine minutes');
-    expect(idlePolicyLine(0, IDLE_HANGUP_MS)).toContain('hanging up');
-  });
-});
-
-// -------------------------------------------------------------------------------------------------
-// Decision door
-// -------------------------------------------------------------------------------------------------
 
 describe('decision door', () => {
   test('urgency mirrors the daemon ladder, with confirmation counted as urgent', () => {
@@ -731,20 +687,8 @@ describe('callPhase / phaseExplanation: the checking window', () => {
     expect(callPhase(binding({ state: 'degraded' }), true)).toBe('degraded');
   });
 
-  test('PHASE_LABEL/PHASE_LABEL_CH cover the new phase without shrinking the reserved width', () => {
-    expect(PHASE_LABEL.checking).toBe('checking');
-    expect(PHASE_LABEL_CH).toBeGreaterThanOrEqual('connecting'.length);
-  });
 
-  test('phaseExplanation says the room does not know yet, not that there is no call', () => {
-    expect(phaseExplanation(null, true)).toContain('Checking');
-    expect(phaseExplanation(null, true)).not.toContain('No call is bound');
-    expect(phaseExplanation(null, false)).toContain('No call is bound');
-  });
 
-  test('phaseExplanation defaults loading to false — every pre-existing call site (no second argument) is unaffected', () => {
-    expect(phaseExplanation(null)).toBe('No call is bound to this thread.');
-  });
 });
 
 describe('isCallConflictError: recognising the daemon\'s own "already has an active call" guard', () => {

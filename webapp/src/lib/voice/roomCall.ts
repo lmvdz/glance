@@ -148,44 +148,6 @@ export function callPhase(binding: VoiceCallBindingDTO | null, loading: boolean)
   return loading ? 'checking' : 'none';
 }
 
-/** Widest label above, in `ch` units, so every phase occupies exactly one reserved box. */
-export const PHASE_LABEL_CH = Math.max(...Object.values(PHASE_LABEL).map((label) => label.length));
-
-/**
- * The binding banner — which call, and which session it is PINNED to.
- *
- * `VoiceCallPill` carries the same idea for the dispatcher lane (`bindingBannerText`), and it earns
- * its place here for a sharper reason: the daemon pins a session identity at connect time and
- * refuses to adopt a different one on the same port (`port-reused`). Printing the pinned id is what
- * lets a person confirm, after a reload, that the call they are looking at is the call they
- * started — not a stranger that inherited the port.
- *
- * `undefined` before the broker has answered: there is genuinely nothing pinned yet, and inventing
- * a placeholder id would be the one thing this banner exists to prevent.
- */
-export function bindingBanner(binding: VoiceCallBindingDTO | null): string | undefined {
-  if (!binding?.callId) return undefined;
-  const session = binding.sessionId ? ` · session ${binding.sessionId}` : ' · session not pinned yet';
-  return `call ${binding.callId}${session}`;
-}
-
-/** The sentence under the phase word. Says what is actually happening, including the two states a
- *  call HUD is normally tempted to paper over — plus, now, the THIRD: `loading` says the room does
- *  not know yet, which reads honestly rather than as a confident (and possibly wrong) "no call". */
-export function phaseExplanation(binding: VoiceCallBindingDTO | null, loading: boolean = false): string {
-  if (!binding) return loading ? 'Checking whether a call is already live in this thread…' : 'No call is bound to this thread.';
-  switch (binding.state) {
-    case 'connecting':
-      return 'Dialling the session and waiting for it to answer.';
-    case 'live':
-      return 'The mic is open. Speak, or type in the composer to steer.';
-    case 'degraded':
-      return 'The live socket dropped. Checking with the call broker whether the session is still running — nothing is being lost from the record.';
-    case 'ended':
-      return terminalReasonCopy(binding.terminalReason, binding.terminalError);
-  }
-}
-
 /** Honest end-of-call copy, one sentence per terminal reason. Mirrors the daemon's own taxonomy
  *  (`voice-call-manager.ts#terminalReasonDetail`) in the room's voice rather than the log's. */
 export function terminalReasonCopy(reason: VoiceCallTerminalReason | undefined, terminalError?: string | null): string {
@@ -274,31 +236,8 @@ export function retentionNotice(binding: VoiceCallBindingDTO): RetentionNotice {
 // =================================================================================================
 // Idle policy (concern 05: 10-minute idle hangup, spoken warning at ~9 minutes)
 // =================================================================================================
-
-export const IDLE_HANGUP_MS = 10 * 60 * 1000;
+/** @substrate the daemon-side idle policy constant's client mirror — display surface pending (concern 25 named gap: the deleted hud was the countdown's only renderer) */
 export const IDLE_WARNING_MS = 9 * 60 * 1000;
-
-/**
- * The idle line, aware of how long the call has actually been quiet. Three registers, because a
- * standing policy and an imminent hangup are not the same message:
- *  - quiet for under a minute → the policy, stated once, calmly.
- *  - past the warning point → the fact that the session is about to say so out loud.
- *  - in between → the remaining minutes, rounded down so it can never over-promise.
- * `lastActivityAt` is the last human OR agent activity, per concern 05's wording.
- */
-export function idlePolicyLine(lastActivityAt: number | undefined, now: number): string {
-  if (lastActivityAt === undefined) return 'The call hangs up after 10 minutes with no one speaking. You hear a spoken warning a minute before.';
-  const idle = Math.max(0, now - lastActivityAt);
-  if (idle >= IDLE_HANGUP_MS) return 'Nobody has spoken for 10 minutes — the call is hanging up.';
-  if (idle >= IDLE_WARNING_MS) return 'Nobody has spoken for nine minutes. The session says so out loud, then hangs up at ten.';
-  if (idle < 60_000) return 'The call hangs up after 10 minutes with no one speaking. You hear a spoken warning a minute before.';
-  const remaining = Math.floor((IDLE_HANGUP_MS - idle) / 60_000);
-  return `Quiet for ${Math.floor(idle / 60_000)} minutes. It hangs up in ${remaining === 1 ? 'a minute' : `${remaining} minutes`}, with a spoken warning first.`;
-}
-
-/** Where the S2S dispatcher lane stands (concern 05: kept, outside room calls only). Shown on the
- *  room's call entry so the two lanes are never mistaken for one control. */
-export const S2S_OUTSIDE_ROOMS_NOTE = 'Rooms use the live call lane only. The older speak-to-the-dispatcher button stays available outside a room.';
 
 /** Which decision classes the room refuses to resolve by voice (concern 05: destructive/outward
  *  actions are UI-only). Everything else is voice-resolvable through read-back plus confirmation. */
