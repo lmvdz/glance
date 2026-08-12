@@ -118,4 +118,25 @@ once a lane closes on it.
 Second theme, security-shaped: B4's env scrub was a suffix DENYLIST (codex reproduced a
 `SECRET_CANARY` leak past it). A scrub that enumerates what to remove is not a boundary; the
 fix is a positive allowlist of what a tenant gate may see. The lesson generalizes to every
-place the harness hands a tenant's code an environment.
+place the harness hands a tenant's code an environment. (B4 round 3 shipped `tenantGateEnv`,
+the allowlist.)
+
+## 2026-08-12 — the primitive materialized, and the limitation is cross-lane
+
+The prediction above held. B4 round 3 exported the shared primitive as **`headTree(repo)` +
+`landedTreeMoved(repo, gatedTree)` in `src/land.ts`** — the local-tree half — and the self-land
+lane's `gh pr merge --match-head-commit` is its commit-level equivalent. Both lanes now bind the
+proof to the tree that lands. This is the campaign's first concrete deliverable beyond receipts:
+lift it to a follow-up ticket and to auto-memory as "the harness's tree-binding primitive."
+
+And the primitive's LIMIT is also cross-lane, confirmed by three independent observers: codex
+found it reviewing B2, the B4 BUILDER flagged it unprompted while implementing B4's PR path, and
+it is the same fact — `--match-head-commit` binds the HEAD, not a BASE advance. If `origin/<base>`
+moves between the scratch gate and the merge, GitHub composes gated content over an ungated base
+and the head match still passes. Neither `gh pr merge` nor a name-reread is a base CAS; only a
+local-merge + lease-push ref update is. Scoped identically in both lanes to a NAMED dogfood
+limitation (map #382 decision comment): the window is serial/operator-routed, so a concurrent
+base-advance during one PR's gate is not the operative threat, and the fix — abandoning
+`gh pr merge` for measured lands — is deferred to Lars as its own ticket. A builder catching the
+exact gap a critic named, from the other lane, is the strongest convergence signal the campaign
+has produced: the limitation is real, bounded, and honestly named rather than papered.
