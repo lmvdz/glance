@@ -24,6 +24,23 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Round 3 review (2026-08-12, iteration 16 — the goal's completion clause)
+Queue was dry (25 done, 2 needs-lars) → fresh review round executed: two Explore agents over
+the post-round-2 tree. Daemon: squad-manager re-measured at 13,570 lines/380 fields with a
+per-region coupling map — the voice surface named as the target shape (23 delegations/12
+fields over the 64-method coordinator); server.ts's 1,748-line handle() measured (99
+matchers). Webapp: the unreachable-surface CLASS found — nothing scans webapp/** exports and
+typechecked tests keep dead symbols green: VoiceCallHud (305 lines, 30-case suite, renders
+into nothing, took the idle-hangup warning down with it), the spawn-proposal hub trio (~226
+lines, doorless card whose copy claims wiring that doesn't exist), AdoptCard (complete
+vertical, no mount). Confirmed the 10-min-toast-vs-3-min-cap lie at VoiceCallContext:408.
+Refuted round-2's "VoiceCallSession class" framing (no state to own — consumer-table file
+split instead). Report: plans/deepen-modules/review-round-3.html (also published as an
+artifact). FOURTEEN candidates queued as concerns 28–41 (10 Strong, 4 Worth-exploring; 39+40
+carry named product gates). Below-cut recorded in the report: LandLane seam B (re-measure
+after 28), FeaturePlaneBridge, TranscriptStreamBuffer, channelTimeline window/paging move,
+shared card-emit primitive (waits on #381), grok CLI ops.
+
 ## Round 3, iteration 15 (2026-08-12, goal mode — PR #381) — CONCERN 21 DONE — QUEUE RESOLVED
 UnitCardProjector: the manager's hand-rolled projection half becomes a module (363 lines behind
 an 8-closure port; manager sheds ~230). Grok's parity table: all 9 moved bodies byte-parity
