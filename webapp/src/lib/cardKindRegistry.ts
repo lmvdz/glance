@@ -40,11 +40,18 @@ export interface CardKindSpec {
 
 export const CARD_KIND_REGISTRY = {
 	'needs-you': { tone: 'warning', doorLabel: 'Answer it', icon: ShieldAlert },
+	// HONEST LABEL: GateVerdictCard.tsx owns the live icon (status-dependent) and door text
+	// ("Open proof record") — this entry's icon/doorLabel serve the generic fallback path only.
 	'gate-verdict': {
 		tone: (face) => (face?.status === 'pass' || face?.status === 'approved' ? 'success' : face?.status === 'fail' || face?.status === 'veto' ? 'destructive' : 'info'),
 		doorLabel: 'Open the proof',
 		icon: CheckCircle2,
 	},
+	// HONEST LABEL (codex M, concern 09 round): the three land kinds and gate-verdict have BESPOKE
+	// renderers (LandCards.tsx, GateVerdictCard.tsx) that own their LIVE tone/icon/door — these
+	// registry fields are consumed only on the generic-card FALLBACK path (an old build, a card
+	// arriving without its bespoke route). Changing a land tone here does NOT change LandCards;
+	// unifying the bespoke renderers onto registry policies is recorded follow-up, not claimed done.
 	'land-attempt': { tone: 'neutral', doorLabel: 'Open the land record', icon: GitMerge },
 	'land-assessment': { tone: 'neutral', doorLabel: 'Open the land record', icon: ShieldAlert },
 	'land-merge': { tone: (face) => (face?.status === 'merged' || face?.status === 'landed' ? 'success' : 'info'), doorLabel: 'Open the land record', icon: GitMerge },

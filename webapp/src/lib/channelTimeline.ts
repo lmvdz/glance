@@ -8,7 +8,7 @@ import type { TranscriptEventKind } from '../../../src/transcript-event-kinds.ts
 import { landCardView, type LandCardKind } from '../components/hub/LandCards';
 import { entryAuthorLabel, entryTimeLabel } from './hub';
 import { unitHref } from './router';
-import { cardKindSpec } from './cardKindRegistry';
+import { CARD_KIND_REGISTRY, cardKindSpec, type RegisteredCardKind } from './cardKindRegistry';
 import { withoutRawRoomEvents } from './voice/roomCall';
 
 export type ChannelCardTone = 'neutral' | 'info' | 'warning' | 'success' | 'destructive';
@@ -150,39 +150,21 @@ export function buildChannelThreadViews(entries: ChannelEntry[]): ChannelCardVie
   return foldRepeatedAsks(withReplies);
 }
 
-// Daemon-emitted kinds only. Compile-time exhaustive: adding a member to ChannelCardKind that
-// isn't 'message' | 'unknown-event' | LocalCardKind forces a matching entry here (or the
-// `satisfies` fails), and an entry here for a kind that doesn't exist fails the same way.
-const POINTER_EVENT_KINDS = {
-  'needs-you': true,
-  'gate-verdict': true,
-  'land-attempt': true,
-  'land-assessment': true,
-  'land-merge': true,
-  'mention-steer': true,
-  'goal-overlap': true,
-  'plan-card': true,
-  'return-emit': true,
-  'design-revised': true,
-  'token-burn-snapshot': true,
-  'unit-spawned': true,
-  'unit-turn-finished': true,
-  'unit-failed': true,
-  'pr-opened': true,
-  'verification-ran': true,
-  'voice-call': true,
-  'voice-decision': true,
-  'voice-fleet-action': true,
-} satisfies Record<TranscriptEventKind, true>;
+// DERIVED from the card-kind registry (codex M, concern 09 round): these were a SECOND
+// hand-populated registration (compile-forced, but still a second place a new kind had to be
+// typed). The registry's own satisfies is exhaustive over TranscriptEventKind | LocalCardKind,
+// so deriving here means one registration covers recognition too. The casts are sound BECAUSE
+// of that exhaustiveness — every daemon kind is a registry key, split by the local: namespace
+// rule (tests/channel-card-kinds-sync.test.ts pins the rule at runtime across builds).
+const POINTER_EVENT_KINDS = Object.fromEntries(
+  (Object.keys(CARD_KIND_REGISTRY) as RegisteredCardKind[]).filter((k) => !k.startsWith('local:')).map((k) => [k, true]),
+) as Record<TranscriptEventKind, true>;
 
-// Client-minted kinds (see LocalCardKind). Exhaustive over LocalCardKind the same way.
 // Exported (only) for tests/channel-card-kinds-sync.test.ts's runtime collision check —
 // the one cross-build invariant tsc cannot see (see that test's doc).
-export const LOCAL_CARD_KINDS = {
-  'local:mention-confirm-required': true,
-  'local:mention-steer-failed': true,
-  'local:spawn-proposal': true,
-} satisfies Record<LocalCardKind, true>;
+export const LOCAL_CARD_KINDS = Object.fromEntries(
+  (Object.keys(CARD_KIND_REGISTRY) as RegisteredCardKind[]).filter((k) => k.startsWith('local:')).map((k) => [k, true]),
+) as Record<LocalCardKind, true>;
 
 /** Narrows a raw wire `eventKind` string to a known ChannelCardKind, or undefined if the daemon
  *  (or webapp) doesn't know how to render it yet. Replaces an unsound `as ChannelCardKind` cast
