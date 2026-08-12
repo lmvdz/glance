@@ -30,7 +30,9 @@ an ADJUDICATION, not the original deletion list:
   round gave those exact fields cross-lineage-blessed conformance pairs would whipsaw the
   direction the round chose. Three of the eight "dead" families are ALIVE today anyway
   (harnessScorecard via insights' shadow deliverable, receipt via TranscriptTimeline/MetaBar,
-  contextBundle via task-model). The truly reader-less fields are now conformance-DOCUMENTED
+  contextBundle via task-model — and grok's verification sweep refuted a FOURTH: 
+  planRevisionCandidates is read at task-model.ts:120, so FOUR of eight are alive). The truly
+  reader-less fields (session, subagents, trace cluster) are now conformance-DOCUMENTED
   mirrors; if a future round wants them gone, each deletion is one omit-list entry + one field —
   a named decision, exactly what the machinery was built for.
 - The split-by-consumer half was executed by siblings: kernel = #375's re-exports; wire
