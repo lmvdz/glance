@@ -17,7 +17,7 @@ their behavior, just organized.
 ## Provenance
 Round-2 review, daemon agent, rank 5, Worth exploring.
 
-## Done (2026-08-12, round 3 iteration 14 — PR pending)
+## Done (2026-08-12, round 3 iteration 14 — PR #380)
 index.ts 1,630 → 382 lines by the deletion test: boot.ts (cmdUp verbatim, hash-verified by
 codex, incident ordering intact), cli/client.ts (ONE api() replacing ~14 fetch sites in 4+
 drifted !res.ok shapes — including two verbs with NO check and one trusting body.ok over HTTP

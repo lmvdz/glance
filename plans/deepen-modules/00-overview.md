@@ -24,7 +24,7 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
-## Round 3, iteration 14 (2026-08-12, goal mode — PR pending) — CONCERN 22 DONE
+## Round 3, iteration 14 (2026-08-12, goal mode — PR #380) — CONCERN 22 DONE
 The CLI split, first slice EXECUTED BY A DELEGATED IMPLEMENTATION AGENT under the playbook and
 gated here: boot.ts hash-identical cmdUp, one api() over 14 drifted fetch sites, 1,630→382
 lines. Codex caught the unification breaking promote --json's 409 script contract (restored +
