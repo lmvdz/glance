@@ -24,6 +24,14 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Round 3, iteration 6 (2026-08-11, goal mode — PR pending) — CONCERN 19 DONE
+UnitAttentionLane: eight hand-rolled append-then-emit raisers become one fail-open chokepoint;
+five escalation Map/Sets become two EscalationLedgers (tick-exact at the cap, both lineages
+verified). Codex M: the first cut minted randomUUID OUTSIDE the try — the fail-open had a hole
+exactly where once-flags were already armed; guard now covers construction. Grok 5/5 clean
+axes. Boundary-sync's REPLACE rows deliberately stay out (different semantics; documented).
+Concern 26's daemon chokepoint now exists. Gates: check 0, root 5340/2-inherited, webapp 2002/0.
+
 ## Round 2 (2026-08-04, iteration 37 — the goal's completion clause)
 Queue was dry (14 done, 3 needs-lars) → fresh review round executed: two Explore agents over
 current main (daemon: squad-manager regions with per-region coupling counts, Store, CLI,
