@@ -24,6 +24,17 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Round 3, iteration 15 (2026-08-12, goal mode — PR #381) — CONCERN 21 DONE — QUEUE RESOLVED
+UnitCardProjector: the manager's hand-rolled projection half becomes a module (363 lines behind
+an 8-closure port; manager sheds ~230). Grok's parity table: all 9 moved bodies byte-parity
+PASS. Codex's two Mediums both landed: the roomWorthy/gateClassOf collapse (two documented
+questions, one dep — the planned grace-period widening would have silently pinned needs-you
+cards to gate-only) and the incomplete structural slice (`options.task` crossed the port behind
+a cast). And the round's native row is the run-the-callers lesson yet again: the full root
+suite caught voice-ratchet's string scanner going blind on the moved needs-you copy — the
+targeted projection suites were all green. Every concern now shows done or needs-lars (13, 26):
+the queue is dry. Next: the round-3 architecture-review — the goal's completion clause.
+
 ## Round 3, iteration 10 (2026-08-11, goal mode — docs) — CONCERN 26 → needs-lars
 The product gate is the whole remaining surface: report-raised/attention cards ARE the thing
 "does a non-blocking proposal earn a room card?" asks about, and both enabling seams already
