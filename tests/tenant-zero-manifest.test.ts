@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { openTenantGateRegistry, readTenantManifestInput, TENANT_MANIFEST_INPUT_PATH } from "../src/tenant-gate-registry.ts";
 import { manifestCommand, manifestHash, manifestStrict } from "../src/tenant-gates.ts";
 import { runProof, setProofRoot } from "../src/proof.ts";
+import { resolveStateDir } from "../src/state-dir.ts";
 
 /**
  * GLANCE AS TENANT ZERO (glance#393, acceptance test).
@@ -96,14 +97,13 @@ describe("glance's own gate contract", () => {
 describe("a real land runs through the manifest path, with counts in the receipt", () => {
 	let repo = "";
 	let proofDir = "";
-	const savedSandbox = process.env.OMP_SQUAD_GATE_SANDBOX;
 
 	beforeAll(async () => {
-		// The gate really executes here, so it runs on the host: the point of this test is the parser
-		// and the receipt, not the sandbox (which tests/gate-runner.test.ts owns). The contract opts out
-		// explicitly via `policy.sandboxStrict: false` AND the env sentinel, so the result does not
-		// depend on whether the machine running the suite happens to have docker.
-		process.env.OMP_SQUAD_GATE_SANDBOX = "host";
+		// The gate really executes here, so it runs on the host: the point of this test is the parser and
+		// the receipt, not the sandbox (which tests/gate-runner.test.ts owns). The env is deliberately
+		// NOT touched — tests/setup.ts already pins OMP_SQUAD_GATE_SANDBOX=host for the whole suite, and
+		// a local set/restore pair would clobber that global for every file after this one. The contract's
+		// `policy.sandboxStrict: false` is what makes the row independent of docker's presence.
 		repo = await fs.mkdtemp(path.join(os.tmpdir(), "tenant-live-"));
 		proofDir = await fs.mkdtemp(path.join(os.tmpdir(), "tenant-proof-"));
 		setProofRoot(proofDir);
@@ -119,9 +119,9 @@ describe("a real land runs through the manifest path, with counts in the receipt
 	});
 
 	afterAll(async () => {
-		if (savedSandbox === undefined) delete process.env.OMP_SQUAD_GATE_SANDBOX;
-		else process.env.OMP_SQUAD_GATE_SANDBOX = savedSandbox;
-		setProofRoot(os.tmpdir());
+		// `proofRoot` is proof.ts module state shared by every test file in this process — restore the
+		// resolved default rather than leaving it pointed at a temp dir that is about to be deleted.
+		setProofRoot(resolveStateDir());
 		await fs.rm(repo, { recursive: true, force: true });
 		await fs.rm(proofDir, { recursive: true, force: true });
 	});

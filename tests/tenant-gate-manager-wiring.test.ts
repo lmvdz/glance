@@ -95,10 +95,12 @@ describe("the Observer's main gate under a contract", () => {
 	test("a registered repo whose contract passes reports a real green", async () => {
 		const repo = await tmp("tenant-wire-repo-");
 		await Bun.spawn(["git", "init", "-q"], { cwd: repo, stdout: "ignore", stderr: "ignore" }).exited;
-		process.env.OMP_SQUAD_GATE_SANDBOX = "host";
+		// The env is NOT touched here: tests/setup.ts already pins OMP_SQUAD_GATE_SANDBOX=host as the
+		// suite's hermetic baseline, and a local set/delete pair would clobber that global for every file
+		// that runs after this one (bun runs the suite in one process — the LANE_POLICY leak shape).
+		// `sandboxStrict: false` in the contract is what makes this row independent of docker.
 		const m = await managerWith(gateManifest(repo, { policy: { sandboxStrict: false } } as Partial<TenantGateManifest>), repo);
 		const r = await m.gate(repo);
-		delete process.env.OMP_SQUAD_GATE_SANDBOX;
 		expect(r.ok).toBe(true);
 		expect(r.skipped).toBeUndefined();
 	}, 60_000);
