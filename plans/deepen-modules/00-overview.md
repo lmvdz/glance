@@ -30,7 +30,7 @@ The product gate is the whole remaining surface: report-raised/attention cards A
 shipped (19's lane chokepoint, 09's one-entry registry). Disposition recorded with the question
 verbatim + the ration-harder alternative named. No pre-gate slice existed.
 
-## Round 3, iteration 10b (2026-08-12, goal mode — docs branch) — CONCERN 27 DONE (adjudicated)
+## Round 3, iterations 10a+10b (2026-08-12 — PR #377) — 26 → needs-lars, 27 DONE (adjudicated)
 The dead-region inventory decayed under this round's own landings: 3 of 8 families ALIVE, the
 split half executed by #373/#375, and deleting conformance-gated mirrors hours after gating them
 would whipsaw. Executed the residue (4 dead api.ts client functions, one-sided by design — CLI
