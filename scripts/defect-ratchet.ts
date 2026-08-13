@@ -95,7 +95,19 @@ export const PATTERNS: DefectPattern[] = [
 		// diff itself couldn't be COMPUTED (environmental git fault), so there is no verdict to park on;
 		// the retry lane + the same escalate-cap episode accounting bound it. Correct polarity. #160 and
 		// #166 merged as siblings, so this baseline was locked before the 15th literal existed.
-		baseline: 15,
+		// 16th reviewed 2026-08-12 (glance#393, B4): `landBranch`'s refusal when a repo HAS a registered
+		// tenant gate manifest whose record cannot be decoded. Polarity checked against both failure
+		// modes above. It is not a branch defect — the branch is untouched and unjudged — and it clears
+		// the moment a human repairs the record, which is precisely the "environmental precondition"
+		// half of the rule. Parking instead (`retryable: false`) would strand every unit in the org
+		// behind one bad JSON edit with no path back except manual un-parking; the escalate cap already
+		// bounds the retry side and surfaces it as "Needs you".
+		// 17th reviewed 2026-08-12 (glance#393, B4 round 2, C-4): `runManifestLandGate`'s refusal when the
+		// manifest RUNNER throws (EROFS/disk-full/spawn-reject) after a local merge — main is restored to
+		// head0 and the land refuses retryable. Same polarity as the 16th and the land.ts refusals above:
+		// the environment threw, the branch is unjudged, and the next ~30s retry tick re-runs it once the
+		// host recovers; the escalate cap bounds it. Parking would wedge a branch on a transient FS fault.
+		baseline: 17,
 	},
 	{
 		id: "raw-truncate-on-judged-path",

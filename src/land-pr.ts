@@ -26,6 +26,8 @@ import { hardenedGit } from "./git-harden.ts";
 import { budgetedExcerpt } from "./gate-logs.ts";
 import { gateExec, greenGateUnproven } from "./gate-runner.ts";
 import { detectVerify, packageManifestError } from "./intake.ts";
+import { runManifestGates } from "./tenant-gate-run.ts";
+import { refusalIsEnvironmental } from "./tenant-gates.ts";
 import { proofGate } from "./proof.ts";
 import { gh, ghJson } from "./gh.ts";
 import { hasModelDeltaMarker } from "./pr-body.ts";
@@ -979,6 +981,12 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 	// Carries the acceptance gate's excerpt (full text always persisted — see excerptForDetail) past the
 	// scratch-worktree try/finally so a GREEN land's DoneProof records it too, not just a refusal's detail.
 	let acceptanceGateExcerpt: string | undefined;
+	// THEME A / C-4 (round 3): the SHA whose merge we are about to GATE. `gh pr merge` later merges
+	// whatever the PR head is ON GITHUB at merge time — a force-push or base advance in the window
+	// between this gate and the merge lands a DIFFERENT tree while still recording verified:green.
+	// Captured here, passed to `gh pr merge --match-head-commit` so GitHub refuses to merge anything
+	// but the exact commit we gated. (Same class as the self-land lane's `--match-head-commit`.)
+	const gatedBranchTip = (await git(["rev-parse", branch], repo)).stdout.trim();
 	try {
 		// Scratch-merge gate: disposable detached worktree of freshly-fetched origin/<default>, merge
 		// the branch into it, run acceptance + the (default-ON, concern 03) regression gate THERE —
@@ -1039,6 +1047,32 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 		const installErr = await installScratchDeps(scratch);
 		if (installErr) return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `acceptance failed on scratch merge: ${installErr}` };
 
+		// A registered tenant contract governs the PR-mode scratch gate too (glance#393). Threaded here
+		// as well as in land.ts because PR mode is a SEPARATE gate path — closing the fail-open only on
+		// the local path would leave the fleet's default land route running on detection.
+		if (opts.manifest) {
+			const outcome = await runManifestGates({ manifest: opts.manifest, cwd: scratch });
+			acceptanceGateExcerpt = await excerptForDetail(outcome.output, 600, opts.agentId);
+			if (!outcome.ok) {
+				const refusal = outcome.refusal;
+				return {
+					ok: false,
+					committed,
+					merged: false,
+					retryable: refusal ? refusalIsEnvironmental(refusal.code) : true,
+					message,
+					mode: "pr",
+					pushed: true,
+					prUrl: ensure.prUrl,
+					prNumber: ensure.prNumber,
+					detail: `tenant gate contract REFUSED the land (${refusal?.code ?? "unknown"}): ${refusal?.reason ?? "no reason recorded"}\n${acceptanceGateExcerpt}`,
+				};
+			}
+			// Green against the contract. The manifest IS the tenant's full gate set, so the
+			// detection-driven regression gate below is skipped rather than re-admitting the guessing.
+			prBaseTip = head0 || undefined; // receipt rollback point (T6), same as the detection path
+			// falls through to the gh merge below — the contract has been satisfied
+		} else {
 		const verify = opts.verify ?? (await detectVerify(repo));
 		// Finding #10 (eap-borrows wave 2): detectVerify(repo) collapses "genuinely no toolchain" and
 		// "package.json exists but is unreadable/malformed" into the same undefined — only intervene when
@@ -1101,6 +1135,7 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 			reMerge: () => git(["merge", "--no-ff", branch], scratch),
 		});
 		if (regressionBlock) return { ...regressionBlock, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber };
+		}
 	} finally {
 		await removeScratchWorktree(repo, scratch);
 	}
@@ -1142,12 +1177,19 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 			return { ok: false, committed, merged: false, retryable: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "draft", detail: `gh pr ready failed: ${ready.stderr || ready.stdout}` };
 		}
 	}
-	// Self-land (C-1): bind the merge to the EXACT gated SHA. `--match-head-commit` makes GitHub REFUSE
-	// the merge server-side if the PR head has moved to a descendant since we measured it — closing the
-	// window where H2 (pushed after our read) merges under an H-only proof and passes assertMerged's
-	// ancestry check. The tree the validator measured is the ONLY tree that can merge.
-	const merged = await gh(prMergeArgs(ensure.prNumber, method, repoSlug, opts.expectHeadOid), repo);
-	if (merged.code !== 0) return { ok: false, committed, merged: false, retryable: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "open", detail: `gh pr merge failed${opts.expectHeadOid ? " (head may have moved since it was gated — --match-head-commit refused)" : ""}: ${merged.stderr || merged.stdout}` };
+	// Bind the merge to the EXACT gated tree via ONE `--match-head-commit` guard (self-land C-1 ∪
+	// tenant-gate C-4 — unified). Two chains independently added this same server-side CAS off main;
+	// `opts.expectHeadOid` (a measured self-land's caller-pinned 40-hex head) and `gatedBranchTip` (the
+	// branch tip the scratch/manifest gate just proved for a normal agent land) are the SAME concept —
+	// the single commit the gate verified — so they collapse into one match head, never two merge calls.
+	// `expectHeadOid` wins when present (the stricter, caller-pinned self-land proof); otherwise the
+	// gated branch tip binds the normal land. Either way GitHub REFUSES the merge server-side if the PR
+	// head has moved to a descendant since we measured it — closing the window where a push after our
+	// read (H2) merges under a stale proof and slips past assertMerged's ancestry check. The tree the
+	// gate measured is the ONLY tree that can merge.
+	const matchHead = opts.expectHeadOid ?? gatedBranchTip;
+	const merged = await gh(prMergeArgs(ensure.prNumber, method, repoSlug, matchHead), repo);
+	if (merged.code !== 0) return { ok: false, committed, merged: false, retryable: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "open", detail: `gh pr merge failed${matchHead ? " (head may have moved since it was gated — --match-head-commit refused)" : ""}: ${merged.stderr || merged.stdout}` };
 
 	// Merge-queue detection (glance#391 round 4, H-2): `gh pr merge` can exit 0 having ENQUEUED the PR
 	// into a merge queue rather than merging synchronously. For a measured self-land, re-read the live

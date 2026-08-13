@@ -52,6 +52,7 @@
  */
 
 import { gateEnv } from "./gate-env.ts";
+import { type GateParser, readGateEvidence } from "./tenant-gates.ts";
 
 export interface GateExec {
 	argv: string[];
@@ -107,6 +108,56 @@ const HOST_ONLY = new Set(["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "XDG_CACHE_H
 
 /** Values of OMP_SQUAD_GATE_SANDBOX that mean "explicitly run on the host" (opt-out). */
 const HOST_SENTINELS = new Set(["host", "off", "0", "no", "false", "disable", "disabled", "none-host"]);
+
+/** A spawned child reduced to what {@link runBounded} needs. */
+interface BoundableProc {
+	pid?: number;
+	exited: Promise<number>;
+	stdout: ReadableStream;
+	stderr: ReadableStream;
+}
+
+/** Kill a process and the group it leads; ignore ESRCH. Negative pid targets the group (reaches
+ *  grandchildren a docker/compose invocation spawns); a child that isn't a group leader simply has no
+ *  matching group, so `-pid` is a safe no-op there and never signals the daemon's own group. */
+function killTree(pid: number | undefined, signal: NodeJS.Signals): void {
+	if (pid === undefined) return;
+	try { process.kill(-pid, signal); } catch { /* group gone or unsupported */ }
+	try { process.kill(pid, signal); } catch { /* already reaped */ }
+}
+
+/**
+ * Await `proc` under a HARD wall-clock ceiling (round 3 High). A single SIGTERM then an unbounded
+ * await is not a bound: a child that ignores SIGTERM, or one whose stdio pipes are held open by a
+ * surviving grandchild, hangs the await forever and with it the daemon. On timeout: SIGTERM the
+ * group, SIGKILL after a grace, then RESOLVE with a synthetic 124 after a final deadline even if the
+ * exit promise never settles. Never throws; the code is non-zero on timeout so a gate fails closed.
+ */
+export async function runBounded(proc: BoundableProc, timeoutMs: number | undefined, label: string): Promise<{ code: number; output: string }> {
+	const output = Promise.all([new Response(proc.stdout).text().catch(() => ""), new Response(proc.stderr).text().catch(() => "")]);
+	if (!timeoutMs || timeoutMs <= 0) {
+		const code = await proc.exited;
+		const [o, e] = await output;
+		return { code, output: `${o}${e}`.trim() };
+	}
+	const GRACE_MS = 5_000;
+	let timedOut = false;
+	const result = await new Promise<number>((resolve) => {
+		let settled = false;
+		const done = (code: number): void => { if (!settled) { settled = true; resolve(code); } };
+		proc.exited.then((c) => done(c), () => done(1));
+		setTimeout(() => {
+			if (settled) return;
+			timedOut = true;
+			killTree(proc.pid, "SIGTERM");
+			setTimeout(() => killTree(proc.pid, "SIGKILL"), GRACE_MS);
+			setTimeout(() => done(124), GRACE_MS + 2_000); // hard deadline, independent of stream closure
+		}, timeoutMs);
+	});
+	const [o, e] = await Promise.race([output, new Promise<[string, string]>((r) => setTimeout(() => r(["", ""]), 2_000))]);
+	const text = `${o}${e}`.trim();
+	return { code: result, output: timedOut ? `${text}\n[gate] "${label}" exceeded ${timeoutMs}ms — process group killed`.trim() : text };
+}
 
 /** Thrown when STRICT is set but docker is unavailable — the gate must refuse, not silently host-run. */
 export class GateSandboxUnavailableError extends Error {
@@ -314,22 +365,43 @@ export async function gateExec(
 		 * container path.
 		 */
 		hostArgv?: string[];
+		/**
+		 * PER-TENANT gate policy (tenant-gates.ts), which BEATS every `OMP_SQUAD_GATE_SANDBOX*` env
+		 * knob for this call. R2 #384's second seam: the env knobs are read from `process.env` at exec
+		 * time, so they are daemon-GLOBAL — tenant A cannot demand hermetic gates while tenant B stays
+		 * permissive, and there is nowhere to put a per-org answer. A registered manifest carries one,
+		 * and it wins, because the environment belongs to the daemon operator while the policy belongs
+		 * to the tenant whose code is being gated.
+		 */
+		policy?: { sandboxStrict?: boolean; sandboxImage?: string; sandboxNetwork?: string };
+		/**
+		 * Docker is MANDATORY for this call, for a reason worth printing. Set by the manifest runner
+		 * when a gate declares `requires.services`/`requires.runnerImage`: a host fallback there does
+		 * not merely weaken the proof, it points the tenant's integration suite at the daemon host's
+		 * own services. Docker-absent throws `GateSandboxUnavailableError` carrying this reason —
+		 * never `hostPlan`.
+		 */
+		requireSandbox?: string;
 	} = {},
 ): Promise<GateExec> {
 	const source = opts.source ?? process.env;
 	const env = opts.env ?? gateEnv(source);
-	const strict = isTruthy(source.OMP_SQUAD_GATE_SANDBOX_STRICT);
-	const raw = source.OMP_SQUAD_GATE_SANDBOX?.trim();
-	const disabled = isTruthy(source.OMP_SQUAD_GATE_SANDBOX_DISABLE) || (raw !== undefined && HOST_SENTINELS.has(raw.toLowerCase()));
+	// Precedence, tightest first: an explicit `requireSandbox` reason, then the tenant policy, then the
+	// daemon-global env knob. A tenant that registered gates never falls back to the host by accident.
+	const strict = !!opts.requireSandbox || (opts.policy?.sandboxStrict ?? isTruthy(source.OMP_SQUAD_GATE_SANDBOX_STRICT));
+	const policyImage = opts.policy?.sandboxImage?.trim();
+	const network = opts.network ?? opts.policy?.sandboxNetwork;
+	const raw = policyImage || source.OMP_SQUAD_GATE_SANDBOX?.trim();
+	const disabled = !policyImage && (isTruthy(source.OMP_SQUAD_GATE_SANDBOX_DISABLE) || (raw !== undefined && HOST_SENTINELS.has(raw.toLowerCase())));
 
 	// Explicit opt-out. STRICT overrides it: its whole point is to never silently run on the host.
 	if (disabled) {
-		if (strict) throw new GateSandboxUnavailableError("OMP_SQUAD_GATE_SANDBOX_STRICT=1 conflicts with the host opt-out — refusing to run the gate unsandboxed (fail-closed)");
+		if (strict) throw new GateSandboxUnavailableError(`${opts.requireSandbox ?? "strict gate policy"} conflicts with the host opt-out — refusing to run the gate unsandboxed (fail-closed)`);
 		return hostPlan(command, env, opts.hostArgv);
 	}
 
-	// Explicit image ⇒ always sandbox with it, as before (no probe — the operator asked for it).
-	if (raw) return sandboxPlan(command, cwd, raw, source, env, opts.mounts, opts.network);
+	// Explicit image ⇒ always sandbox with it, as before (no probe — the operator/tenant asked for it).
+	if (raw) return sandboxPlan(command, cwd, raw, source, env, opts.mounts, network);
 
 	// Auto (default): sandbox if docker is usable, else a legible host fallback (or fail closed under STRICT).
 	const available = await (opts.dockerProbe ? opts.dockerProbe() : dockerAvailable());
@@ -339,14 +411,14 @@ export async function gateExec(
 		// image has no git, which is fatal to any real gate (see the header + ompsq-432).
 		const named = source.OMP_SQUAD_GATE_SANDBOX_IMAGE?.trim();
 		const image = named || (await (opts.imageBuilder ? opts.imageBuilder() : defaultGateImage()));
-		const plan = sandboxPlan(command, cwd, image, source, env, opts.mounts, opts.network);
+		const plan = sandboxPlan(command, cwd, image, source, env, opts.mounts, network);
 		// The builder resolves the bare base image ONLY on build failure — mark the plan degraded so
 		// callers (gateRunUnrunnable) can refuse to trust a failed run in it instead of misreading a
 		// missing-binary death as a code failure.
 		if (!named && image === DEFAULT_SANDBOX_IMAGE) plan.degraded = true;
 		return plan;
 	}
-	if (strict) throw new GateSandboxUnavailableError("OMP_SQUAD_GATE_SANDBOX_STRICT=1 but docker is unavailable — refusing to run the gate on the host (fail-closed)");
+	if (strict) throw new GateSandboxUnavailableError(opts.requireSandbox ? `${opts.requireSandbox}, and docker is unavailable — refusing to run the gate on the host (fail-closed)` : "strict gate policy is set but docker is unavailable — refusing to run the gate on the host (fail-closed)");
 	warnHostFallbackOnce("docker is unavailable");
 	return hostPlan(command, env, opts.hostArgv);
 }
@@ -360,12 +432,29 @@ export async function gateExec(
 export async function execGatedCommand(
 	command: string,
 	cwd: string,
-	opts: { mounts?: string[]; env?: Record<string, string>; network?: string; hostArgv?: string[] } = {},
-): Promise<{ code: number; stdout: string; stderr: string }> {
-	const plan = await gateExec(command, cwd, { mounts: opts.mounts, env: opts.env, network: opts.network, hostArgv: opts.hostArgv });
+	opts: {
+		mounts?: string[];
+		env?: Record<string, string>;
+		network?: string;
+		hostArgv?: string[];
+		policy?: { sandboxStrict?: boolean; sandboxImage?: string; sandboxNetwork?: string };
+		requireSandbox?: string;
+		/** Wall-clock ceiling; the gate child is killed if it exceeds it (H-5, glance#393). A killed
+		 *  gate surfaces as a non-zero exit, which fails closed. Omitted ⇒ no timeout (legacy callers). */
+		timeoutMs?: number;
+	} = {},
+): Promise<{ code: number; stdout: string; stderr: string; sandboxed: boolean; degraded?: boolean }> {
+	const plan = await gateExec(command, cwd, { mounts: opts.mounts, env: opts.env, network: opts.network, hostArgv: opts.hostArgv, policy: opts.policy, requireSandbox: opts.requireSandbox });
 	const proc = Bun.spawn(plan.argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: plan.env });
-	const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-	return { code: await proc.exited, stdout, stderr };
+	// Round 3 High: the previous `setTimeout(() => proc.kill())` sent ONE SIGTERM then awaited
+	// proc.exited forever — a child ignoring SIGTERM, or a surviving docker grandchild holding the
+	// stdio pipes open, hung the daemon. `runBounded` (below) kills the process group, escalates to
+	// SIGKILL, and resolves on a hard deadline independent of stream closure. R2 #384 fail-open #3: the
+	// return still carries sandboxed/degraded so callers can classify a degraded run.
+	const { code, output } = await runBounded(proc, opts.timeoutMs, command);
+	// `runBounded` merges stdout+stderr; gateRunUnrunnable/greenGateUnproven scan the combined text, so
+	// hand the whole thing back as stdout and leave stderr empty rather than re-splitting.
+	return { code, stdout: output, stderr: "", sandboxed: plan.sandboxed, degraded: plan.degraded };
 }
 
 // ── Unrunnable-gate classifier ─────────────────────────────────────────────────────────────────
@@ -404,14 +493,38 @@ export const TESTS_RAN_RE = /\b[1-9]\d* pass\b/;
  * suite whose captured failure text happens to contain "command not found" (fixtures testing
  * missing-binary handling) is still judged on its failures, not misread as an env failure.
  */
-export function gateRunUnrunnable(run: GateRunLike, command?: string): string | undefined {
+export function gateRunUnrunnable(run: GateRunLike, command?: string, parser?: GateParser): string | undefined {
 	if (run.code === 0) return undefined; // green is green
 	if (run.code === 127) return "exit 127 — the gate command itself could not execute (command not found)";
-	if (TESTS_RAN_RE.test(run.output)) return undefined; // tests demonstrably ran — a real red, judge it on failures
+	if (testsDemonstrablyRan(run.output, parser)) return undefined; // tests demonstrably ran — a real red, judge it on failures
 	if (NOT_FOUND_RE.test(run.output)) return "gate output shows an executable-resolution failure and no test ever ran — the environment lacks a binary the gate needs";
 	if (run.degraded) return `gate ran inside the DEGRADED bare sandbox image (${DEFAULT_SANDBOX_IMAGE} — the ${DERIVED_SANDBOX_IMAGE} build failed) and no test ever ran`;
-	if (command && /\btest\b/.test(command) && ZERO_TESTS_RE.test(run.output)) return "test gate executed zero tests — the suite never ran";
+	if (zeroTestsProven(run.output, command, parser)) return `test gate executed zero tests — the suite never ran${parser ? ` (${parser} output)` : ""}`;
 	return undefined;
+}
+
+/**
+ * PARSER-AWARE replacements for the bun-only `TESTS_RAN_RE`/`ZERO_TESTS_RE` pair — R2 #384's
+ * highest-value tenant fail-open (#4): `ZERO_TESTS_RE` knows only bun's phrasing, so a Vitest run
+ * under `--passWithNoTests` exits 0 with neither marker, `greenGateUnproven` returns undefined, and
+ * a foreign-stack tenant lands on a suite that ran nothing.
+ *
+ * `parser` comes from the TENANT CONTRACT (tenant-gates.ts), never guessed from the command string —
+ * guessing is what produced the bun-shaped assumption in the first place. Omitted ⇒ the historical
+ * bun-only behavior, byte-for-byte, which is what every un-registered repo in the fleet still gets.
+ */
+function testsDemonstrablyRan(output: string, parser?: GateParser): boolean {
+	if (!parser) return TESTS_RAN_RE.test(output);
+	const tests = readGateEvidence(parser, output).tests;
+	return tests !== undefined && tests > 0;
+}
+
+function zeroTestsProven(output: string, command?: string, parser?: GateParser): boolean {
+	if (!parser) return !!command && /\btest\b/.test(command) && ZERO_TESTS_RE.test(output);
+	// Under a declared parser the command name is irrelevant: a tenant's test gate is called
+	// `ci:counts` or `test:integration` as often as `test`, and the `\btest\b` sniff silently exempted
+	// every one of them from the zero-tests check.
+	return parser !== "raw" && readGateEvidence(parser, output).tests === 0;
 }
 
 /**
@@ -430,9 +543,9 @@ export function gateRunUnrunnable(run: GateRunLike, command?: string): string | 
  * Was previously private to land-pr.ts (PR-mode only) — moved here and exported so the LOCAL land
  * path (land.ts) can apply the same classifier instead of trusting any bare exit 0.
  */
-export function greenGateUnproven(run: GateRunLike, command: string): string | undefined {
+export function greenGateUnproven(run: GateRunLike, command: string, parser?: GateParser): string | undefined {
 	if (run.degraded) return "gate ran inside the DEGRADED bare sandbox image and reported success — cannot trust an unverified environment as a pass";
-	if (TESTS_RAN_RE.test(run.output)) return undefined; // tests demonstrably ran — trust the pass
-	if (/\btest\b/.test(command) && ZERO_TESTS_RE.test(run.output)) return "test gate exited 0 but executed zero tests — the suite never ran";
+	if (testsDemonstrablyRan(run.output, parser)) return undefined; // tests demonstrably ran — trust the pass
+	if (zeroTestsProven(run.output, command, parser)) return `test gate exited 0 but executed zero tests — the suite never ran${parser ? ` (${parser} output)` : ""}`;
 	return undefined;
 }

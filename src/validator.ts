@@ -574,6 +574,9 @@ export interface ValidatorGateOpts {
 	 *  defaults to `undefined`), so a launch-directory `.env` can never redirect the land path's read of
 	 *  the reviewer ledger. Undefined ⇒ `DEFAULT_REVIEWER_LEDGER_PATH`. */
 	reviewerLedgerPath?: string;
+	/** The registered TenantGateManifest's hash (tenant-gates.ts), stamped into the receipt so it
+	 *  states WHICH gate contract the land passed. Absent ⇒ the repo is not a registered tenant. */
+	manifestHash?: string;
 }
 
 export interface ValidatorGateResult {
@@ -912,6 +915,11 @@ export async function validatorGate(opts: ValidatorGateOpts): Promise<ValidatorG
 	// glance#332 gauntlet round 1 (SHIP BLOCKER): re-stamp reviewerPrecision fresh here, unconditionally
 	// — cache hit or miss — never from the cache itself. See withFreshReviewerPrecision's doc.
 	record = withFreshReviewerPrecision(record, opts.reviewerLedgerPath);
+	// The tenant contract this land was gated by (B4/#393). Stamped AFTER the cache read on purpose:
+	// the cache is keyed on (commit, tree, criteria) and knows nothing about the manifest, so a cached
+	// verdict re-used under a re-registered contract must carry the CURRENT hash, not the one that
+	// happened to be in force when the judge first ran. Absent ⇒ an un-registered repo (detection).
+	if (opts.manifestHash) record = { ...record, manifestHash: opts.manifestHash };
 	if (record.verdict === "inconclusive") {
 		return {
 			record,
