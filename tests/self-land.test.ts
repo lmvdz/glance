@@ -26,6 +26,8 @@ import { SquadManager } from "../src/squad-manager.ts";
 import { SquadServer } from "../src/server.ts";
 import type { Judge } from "../src/validator.ts";
 import type { LandReceipt } from "../src/rail/index.ts";
+import type { ValidationRecord } from "../src/types.ts";
+import type { ReviewerPrecisionStamp } from "../src/memory/index.ts";
 
 const tmps: string[] = [];
 afterEach(async () => {
@@ -186,7 +188,7 @@ test("UNMEASURED TRAP (why it matters): a receipt whose validator verdict is \"s
 		files: [],
 		landed: true,
 		at: Date.now(),
-		gate: { status: "green" },
+		gate: { status: "green", unprovenGreenRejected: false, newRegressions: [], baseWasRed: false },
 		validation: { verdict: "skipped", agreement: 1, confidence: 0, perCriterion: [], rationale: "no declared criteria", ranAt: Date.now() },
 		forcedWithoutProof: false,
 		cost: { costUnknown: true },
@@ -213,7 +215,14 @@ test("HAPPY PATH: a self-land into a scratch target branch merges and writes a M
 	expect(result.criteriaCount).toBe(2);
 	expect(result.verdict).toBe("pass");
 	// The measurement itself: a real lineage, a real n, read off the fixture reviewer ledger.
-	expect(result.precision).toEqual({ lineage: "native", n: 3, survived: 2, survivedRate: 2 / 3, provisional: true });
+	// `SelfLandResult.precision` is declared as the narrower `LandReceiptPrecision` (the persisted-row
+	// shape), but at runtime it is assigned the FULL `ReviewerPrecisionStamp` straight from the
+	// validator (squad-manager.ts selfLand, `const precision: LandReceiptPrecision | undefined =
+	// validation?.reviewerPrecision`) — unstripped, so `survivedRate`/`provisional` really are on it.
+	// Type the expected literal as the real runtime shape (a superset of `LandReceiptPrecision`, so
+	// still assignable where `LandReceiptPrecision` is expected) rather than casting it away.
+	const expectedPrecision: ReviewerPrecisionStamp = { lineage: "native", n: 3, survived: 2, survivedRate: 2 / 3, provisional: true };
+	expect(result.precision).toEqual(expectedPrecision);
 	// `measured` is the VERDICT (a judge graded every criterion, pass, before the merge); `countedByWindow`
 	// adds precision.n>0 (the reviewer has history). Both hold here.
 	expect(result.measured).toBe(true);
@@ -257,7 +266,7 @@ test("HAPPY PATH: the self-land worktree is torn down after the land (no state-d
 // merging an unmeasured land. The gate is GREEN in each, so the ONLY thing stopping the merge is the
 // verdict. A merged, then a clean state (target SHA unchanged, no receipt row) proves nothing landed.
 
-async function expectUnmeasuredRefusal(mgr: TestManager, repo: string, stateDir: string, expectedVerdict: string): Promise<void> {
+async function expectUnmeasuredRefusal(mgr: TestManager, repo: string, stateDir: string, expectedVerdict: ValidationRecord["verdict"]): Promise<void> {
 	const before = await headOf(repo, TARGET);
 	const result = await mgr.selfLand({ repo, branch: BRANCH, criteria: CRITERIA, expectBase: TARGET });
 	expect(result.ok).toBe(false);

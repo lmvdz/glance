@@ -232,7 +232,7 @@ const passRow = (branch: string, commit: string): LandReceiptIndexRow => ({ at: 
 
 test("H-3: appendLandReceiptIndexRow durably records a row the window reads back", async () => {
 	const stateDir = await tmpDir("selfland-durable-");
-	const receipt: LandReceipt = { repo: "lmvdz/glance", branch: "deepen/x", commit: "c1", files: [], landed: true, at: Date.now(), gate: { status: "green" }, validation: { verdict: "pass", agreement: 1, confidence: 1, perCriterion: [{ id: "ac1", satisfied: true }], rationale: "ok", ranAt: 1, reviewerPrecision: { lineage: "native", n: 3, survived: 2, survivedRate: 2 / 3, provisional: true } }, forcedWithoutProof: false, cost: { costUnknown: true }, criteriaSource: "pr-body" };
+	const receipt: LandReceipt = { repo: "lmvdz/glance", branch: "deepen/x", commit: "c1", files: [], landed: true, at: Date.now(), gate: { status: "green", unprovenGreenRejected: false, newRegressions: [], baseWasRed: false }, validation: { verdict: "pass", agreement: 1, confidence: 1, perCriterion: [{ id: "ac1", satisfied: true }], rationale: "ok", ranAt: 1, reviewerPrecision: { lineage: "native", n: 3, survived: 2, survivedRate: 2 / 3, provisional: true } }, forcedWithoutProof: false, cost: { costUnknown: true }, criteriaSource: "pr-body" };
 	await appendLandReceiptIndexRow(stateDir, receipt);
 	const { rows } = await readLandReceiptIndex(stateDir);
 	expect(rows.length).toBe(1);
@@ -302,7 +302,7 @@ test("C-3: readSelfLandJournal FAILS CLOSED on an unreadable journal (never a si
 
 test("M-1: readLandReceiptIndex dedupes a double-appended row on the stable land id (no double-count)", async () => {
 	const stateDir = await tmpDir("selfland-dedupe-");
-	const receipt: LandReceipt = { repo: "lmvdz/glance", branch: "deepen/dup", commit: "cc", files: [], landed: true, at: Date.now(), gate: { status: "green" }, validation: { verdict: "pass", agreement: 1, confidence: 1, perCriterion: [{ id: "ac1", satisfied: true }], rationale: "ok", ranAt: 1, reviewerPrecision: { lineage: "native", n: 3, survived: 2, survivedRate: 2 / 3, provisional: true } }, forcedWithoutProof: false, cost: { costUnknown: true } };
+	const receipt: LandReceipt = { repo: "lmvdz/glance", branch: "deepen/dup", commit: "cc", files: [], landed: true, at: Date.now(), gate: { status: "green", unprovenGreenRejected: false, newRegressions: [], baseWasRed: false }, validation: { verdict: "pass", agreement: 1, confidence: 1, perCriterion: [{ id: "ac1", satisfied: true }], rationale: "ok", ranAt: 1, reviewerPrecision: { lineage: "native", n: 3, survived: 2, survivedRate: 2 / 3, provisional: true } }, forcedWithoutProof: false, cost: { costUnknown: true } };
 	// The retry-after-a-late-EIO case: the same row lands in the index TWICE.
 	await appendLandReceiptIndexRow(stateDir, receipt);
 	await appendLandReceiptIndexRow(stateDir, receipt);

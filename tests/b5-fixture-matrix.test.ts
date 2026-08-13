@@ -194,14 +194,17 @@ async function expectRefused(
 ): Promise<string> {
 	expect(row.res.ok).toBe(false);
 	expect(row.res.merged).toBe(false);
-	expect(refusalCodeOf(row.res.detail)).toBe(code);
+	// A refusal ALWAYS sets detail (the rail's positive signal); assert that before narrowing away the
+	// `| undefined` for the code/return-type checks below.
+	expect(row.res.detail).toBeDefined();
+	expect(refusalCodeOf(row.res.detail!)).toBe(code);
 	expect(row.res.detail).toContain(reasonIncludes);
 	// The load-bearing anti-"red fixture lands" assertions: main is exactly where it started, and there
 	// is no green post-merge proof for a refused land.
 	expect(row.mainAfter).toBe(row.fixture.head0);
 	const proof = await proofFor(row.fixture.repo, row.fixture.repo);
 	expect(proof?.ok).not.toBe(true);
-	return row.res.detail;
+	return row.res.detail!;
 }
 
 // Collected for the cross-row distinctness assertion (each refusal reason must be its OWN sentence).
@@ -271,12 +274,14 @@ describe("B5 #394 — the rigged-red matrix through the real rail", () => {
 		const row = await driveRow({}, [gateServiceUnstartable()]);
 		expect(row.res.ok).toBe(false);
 		expect(row.res.merged).toBe(false);
-		expect(refusalCodeOf(row.res.detail)).toBe("service-unavailable");
+		// A refusal ALWAYS sets detail; assert it before narrowing away `| undefined`.
+		expect(row.res.detail).toBeDefined();
+		expect(refusalCodeOf(row.res.detail!)).toBe("service-unavailable");
 		expect(row.mainAfter).toBe(row.fixture.head0);
 		expect(await fs.exists(path.join(row.fixture.repo, "R3_MARKER_RAN"))).toBe(false);
 		const proof = await proofFor(row.fixture.repo, row.fixture.repo);
 		expect(proof?.ok).not.toBe(true);
-		refusalReasons.R3 = row.res.detail;
+		refusalReasons.R3 = row.res.detail!;
 		refusalCodes.R3 = "service-unavailable";
 	}, 120_000);
 
@@ -392,7 +397,9 @@ describe("B5 #394 — the rigged-red matrix through the real rail", () => {
 			// The refusal is OBSERVABLE — exactly what R6's happy-path assertions now trip on (no skip escape).
 			expect(res.ok).toBe(false);
 			expect(res.merged).toBe(false);
-			expect(refusalCodeOf(res.detail)).toBe("runner-unavailable");
+			// A refusal ALWAYS sets detail; assert it before narrowing away `| undefined`.
+			expect(res.detail).toBeDefined();
+			expect(refusalCodeOf(res.detail!)).toBe("runner-unavailable");
 			expect(await headOf(fixture.repo)).toBe(fixture.head0);
 		},
 		120_000,
