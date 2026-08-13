@@ -367,7 +367,21 @@ export async function runManifestLandGate(a: {
 			},
 		};
 	}
-	const counts = outcome.results.map((r) => `${r.name}${r.tests === undefined ? "" : `=${r.tests} tests`}`).join(", ");
+	// B4 receipt bug surfaced by B5 (#394): this formatter carried only `r.tests` and DISCARDED
+	// `r.counts`, so a receipt showed `test=12 tests` but not a `counts-script` gate's named counts
+	// (an integration gate's `rows=3`, a CI script's `files=3/cases=12`). A receipt whose whole job is
+	// to state WHAT the gate proved was silently dropping the count evidence a count-asserting contract
+	// exists to record — and the B3 dogfood verdict-table wants those counts too. Now every gate's
+	// proven evidence rides into the receipt: `tests` when a test parser proved a run, and every named
+	// `counts` entry. `/`-joined WITHIN a gate so the outer `, ` join across gates stays unambiguous.
+	const counts = outcome.results
+		.map((r) => {
+			const bits: string[] = [];
+			if (r.tests !== undefined) bits.push(`${r.tests} tests`);
+			for (const [k, v] of Object.entries(r.counts ?? {})) bits.push(`${k}=${v}`);
+			return bits.length ? `${r.name}=${bits.join("/")}` : r.name;
+		})
+		.join(", ");
 	return { ok: true, sandboxed: outcome.results.every((r) => r.sandboxed !== false), detail: `verified against tenant contract ${outcome.manifestHash.slice(0, 12)} (${counts})` };
 }
 
