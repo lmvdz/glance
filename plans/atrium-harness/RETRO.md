@@ -176,3 +176,46 @@ a fresh codex confirm on the round-4 diff. Recorded as a measured coverage gap, 
 grok narration-flakes are — foreign-lineage CLI reliability is an ops fact of this harness, not
 an anecdote. When a relay hangs, read its backgrounded output file directly (that worked twice
 this session) rather than trusting the relay to collect.
+
+## 2026-08-12 — B4 tenant manifest CLOSED (#393), five rounds
+
+The longest lane, and the one that most vindicates the both-lineage-on-security rule. Five rounds:
+- **R1**: manifest wired into only some land seams — auto-resolve/in-place/thrown-runner bypassed
+  it; registry corruption failed open; env scrub was a suffix denylist. Full tri-lineage UNSOUND.
+- **R2**: fixes reached more seams but the manifest still wasn't bound to the landed tree
+  (auto-resolve reviewer commits after the gate; PR merges a later tree); env allowlist covered
+  only the gate exec.
+- **R3**: tree-binding landed (headTree/landedTreeMoved) + allowlist — but grok found the
+  allowlist reached only ONE of three env-handing seams (teardown, compose spawn still leaked).
+- **R4**: allowlist to every seam — but codex found the fix's OWN `COMPOSE_*` PREFIX admission let
+  `COMPOSE_ENV_FILES` reopen the leak, proven live against real `docker compose config`.
+- **R5**: exact-name allowlist (prefix admission deleted) + hard config-injection floor + explicit
+  empty `--env-file`, live-proven. grok's r5 confirm hung; its bounded probe adjudicated directly.
+
+The transferable lesson, earned the hard way across two rounds: **a suffix denylist is not a
+boundary, and a prefix allowlist is not a boundary — only exact-name admission with a hard floor
+for injection vectors is.** And the both-lineage payoff was concrete, not theoretical: grok found
+WHERE the allowlist didn't reach (seam coverage), codex found that the fix's own shape reopened the
+leak (the config-var bypass). Neither would have found the other's; running both on the security
+path is what closed it. Recorded for auto-memory — this is a security-review pattern that transfers
+to any harness handing untrusted code an environment.
+
+Boundary decision (accepted, recorded): daemon secrets cannot cross into a tenant's gate/service
+container; a tenant's OWN declared literal `s.env` values do, by design — validating tenant literals
+for "secret shapes" would block legit fixtures while closing no real leak.
+
+Ops: BOTH foreign-lineage relays hung on this diff (codex r3 ~40min, grok r5 ~56min), each in a
+tool loop with no verdict. Both times the fix was to read the backgrounded output file directly, or
+— for grok r5 — to adjudicate its bounded probe question against the code myself. Foreign-CLI
+reliability on large/security diffs is a measured ops fact of this harness; the mitigation is
+direct-file-read + orchestrator adjudication, not re-dispatch.
+
+## 2026-08-12 — the campaign shape, at three lanes closed
+
+B2 (self-land, 4 rounds), B3 (receipts+wedge, independent-SOUND), B4 (tenant manifest, 5 rounds)
+all closed. The pattern held across every lane: a correct-looking first cut, then each blind round
+finding a genuinely deeper or wider real defect, converging only when both lineages ranked the
+residuals equal-or-shallower. Thirteen build/fix/confirm rounds total, ~57 adjudicated ledger rows,
+zero fail-open shipped. This IS the price of "glance gates code fail-closed" — and paying it on
+glance's OWN rail, before atrium, is the whole point of the sequencing. Remaining: B5 (artifact-2
+proof, running), the bridge-doc tri-lineage (artifact-3 confirm), then T-FINAL stays blocked on Lars.
