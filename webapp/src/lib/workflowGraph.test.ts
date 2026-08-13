@@ -10,10 +10,13 @@ function agent(id: string, extra: Partial<AgentDTO> = {}): AgentDTO {
     id,
     name: id,
     status: 'working',
+    kind: 'omp-operator',
     repo: '/repo',
     worktree: '/repo/.worktrees/' + id,
     pending: [],
     lastActivity: 0,
+    messageCount: 0,
+    approvalMode: 'always-ask',
     autonomyMode: 'assist',
     effectiveMode: 'assist',
     verificationState: 'unknown',
@@ -156,7 +159,7 @@ describe('pickWorkflowGraphAgent', () => {
     const dead = agent('dead', {
       status: 'stopped',
       workflowGraph: graphSnapshot(),
-      workflowState: { currentNode: 'exit', visits: {}, vars: {}, rollup: [], terminal: { reason: 'ran-off-the-end' } },
+      workflowState: { currentNode: 'exit', visits: {}, vars: {}, rollup: [], terminal: { reason: 'ran-off-the-end', at: 100, forkPoint: { runId: 'dead', seq: 0 } } },
       lastActivity: 100,
     });
     const live = agent('live', {

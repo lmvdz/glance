@@ -18,6 +18,8 @@ const consoleChat = (over: Partial<AgentDTO> = {}): AgentDTO => ({
   worktree: '/srv/r/wt',
   pending: [],
   lastActivity: 1,
+  messageCount: 0,
+  approvalMode: 'always-ask',
   autonomyMode: 'assist',
   effectiveMode: 'assist',
   verificationState: 'unknown',

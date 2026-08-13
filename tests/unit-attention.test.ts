@@ -12,7 +12,7 @@ describe("UnitAttentionLane.raise — the one append-then-emit chokepoint", () =
 		const event = lane.raise(rec, { summary: "look here", detail: "why", source: "notify" });
 		expect(rec.dto.attentionEvents).toHaveLength(1);
 		expect(rec.dto.attentionEvents?.[0]).toMatchObject({ summary: "look here", detail: "why", source: "notify" });
-		expect(rec.dto.attentionEvents?.[0]?.id).toBe(event.id);
+		expect(rec.dto.attentionEvents?.[0]?.id).toBe(event!.id);
 		expect(emitted).toEqual(["u1"]);
 	});
 

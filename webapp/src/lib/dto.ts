@@ -860,7 +860,7 @@ export interface VoiceCallTranscriptTurnDTO {
 
 /** Mirrors backend AutomationSkipReason (src/types.ts) — a CLOSED union; string would let UI
  *  code treat arbitrary text as a structured skip reason (codex M, concern 24 round). */
-export type AutomationSkipReasonDTO = "budget" | "overlap" | "wip-cap" | "idle" | "already-handled" | "human-review" | "blocked" | "already-done" | "unreleased-state" | "dirty-main";
+export type AutomationSkipReasonDTO = "budget" | "overlap" | "wip-cap" | "idle" | "already-handled" | "human-review" | "blocked" | "already-done" | "unreleased-state" | "difficulty" | "dirty-main";
 
 /** Mirrors backend AutomationLoop (src/types.ts). */
 export type AutomationLoopDTO = "scout" | "observer" | "opportunity" | "dispatch" | "scope" | "plan-sync" | "resident-planner" | "sentinel" | "orphan-audit" | "land" | "episode";

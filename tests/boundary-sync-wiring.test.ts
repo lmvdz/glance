@@ -47,8 +47,8 @@ class TestManager extends SquadManager {
 	 *  capture/sync/apply/discard rides). */
 	enqueue(id: string, fn: () => Promise<void>): Promise<void> {
 		const rec = this.agents.get(id) as never;
-		const realDir = this.lane["target" as never](rec) as unknown as string;
-		return this.lane["queue" as never](rec, realDir as never, fn as never) as unknown as Promise<void>;
+		const realDir = (this.lane["target" as never] as unknown as (rec: unknown) => string)(rec);
+		return (this.lane["queue" as never] as unknown as (rec: unknown, realDir: string, fn: () => Promise<void>) => Promise<void>)(rec, realDir, fn);
 	}
 	reattach(): Promise<void> {
 		// the frame loop calls this lane seam; tests reach it the same way answers.test.ts does
