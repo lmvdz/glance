@@ -45,7 +45,7 @@ class OneShotDriver extends EventEmitter implements AgentDriver {
 		return undefined;
 	}
 	async getState(): Promise<RpcSessionState> {
-		return { todoPhases: [], isStreaming: false } as RpcSessionState;
+		return { todoPhases: [], isStreaming: false } as unknown as RpcSessionState;
 	}
 	respondUi(): void {}
 	respondHostTool(): void {}
@@ -65,7 +65,7 @@ class NeverFinishesDriver extends EventEmitter implements AgentDriver {
 		return undefined;
 	}
 	async getState(): Promise<RpcSessionState> {
-		return { todoPhases: [], isStreaming: true } as RpcSessionState;
+		return { todoPhases: [], isStreaming: true } as unknown as RpcSessionState;
 	}
 	respondUi(): void {}
 	respondHostTool(): void {}

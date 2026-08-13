@@ -18,7 +18,7 @@ import { openDatabase } from "../src/db/index.ts";
 import { DEV_INSECURE_SECRET, makeAuth, expandLoopbackOrigins } from "../src/db/auth.ts";
 import { secretBootDecision } from "../src/boot.ts";
 import { SquadManager } from "../src/squad-manager.ts";
-import { SquadServer } from "../src/server.ts";
+import { SquadServer, type AuthInstance } from "../src/server.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => {
@@ -42,7 +42,7 @@ function freePort(): number {
 	const probe = Bun.serve({ port: 0, fetch: () => new Response("ok") });
 	const p = probe.port;
 	probe.stop(true);
-	return p;
+	return p!;
 }
 
 /** Spin a real DB-mode server on a fresh sqlite file + free port; registers its own cleanup.
@@ -68,7 +68,7 @@ async function setupDbServer(opts: { token?: string; allowSignup?: boolean } = {
 	const port = freePort();
 	const origin = `http://127.0.0.1:${port}`;
 	const trustedOrigins = [origin, `http://localhost:${port}`];
-	const auth = makeAuth({ dialect: dbHandle.dialect, type: dbHandle.type, trustedOrigins, baseURL: origin });
+	const auth = makeAuth({ dialect: dbHandle.dialect, type: dbHandle.type, trustedOrigins, baseURL: origin }) as unknown as AuthInstance;
 
 	const mgr = new SquadManager({ stateDir: dir });
 	await mgr.start();

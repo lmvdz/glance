@@ -73,7 +73,7 @@ interface Harness {
   pcs: PeerConnectionLike[];
   mintCalls: number;
   mintImpl: () => Promise<VoiceMintTokenLike>;
-  postSdpOfferImpl: () => Promise<string>;
+  postSdpOfferImpl: PostSdpOfferImpl;
   getUserMediaImpl: () => Promise<MediaStream>;
   getUserMediaCalls: number;
   timers: { fn: () => void; ms: number; handle: number }[];

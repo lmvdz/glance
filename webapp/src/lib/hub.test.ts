@@ -89,8 +89,7 @@ describe('Hub reductions', () => {
     const html = renderToStaticMarkup(
       React.createElement(
         RoomFrame,
-        { repo: 'omp-squad', rooms: [], activeRoomId: 'fleet', onOpenRoom: () => undefined, nodes: [], plans: 0, now: 0, onSelect: () => undefined, onEnter: () => undefined },
-        'room content',
+        { repo: 'omp-squad', rooms: [], activeRoomId: 'fleet', onOpenRoom: () => undefined, nodes: [], plans: 0, now: 0, onSelect: () => undefined, onEnter: () => undefined, children: 'room content' },
       ),
     );
     expect(html).not.toContain('aria-label="Workbench surfaces"');
@@ -134,8 +133,8 @@ describe('Hub reductions', () => {
           now: 0,
           onSelect: () => undefined,
           onEnter: () => undefined,
+          children: 'room content',
         },
-        'room content',
       ),
     );
     expect(html).toContain('glance'); // TopBar's own wordmark
@@ -161,8 +160,8 @@ describe('Hub reductions', () => {
           onSelect: () => undefined,
           onEnter: () => undefined,
           decision: React.createElement('div', null, 'a decision panel'),
+          children: 'room content',
         },
-        'room content',
       ),
     );
     expect(html).toContain('glance');

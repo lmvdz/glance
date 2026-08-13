@@ -116,6 +116,26 @@ gated here: boot.ts hash-identical cmdUp, one api() over 14 drifted fetch sites,
 lines. Codex caught the unification breaking promote --json's 409 script contract (restored +
 3 regression pins added for the ~18 changed error paths). My own multiset verb check + codex
 both confirmed origin's duplicate dead case-open. Gates green.
+## Round 3, iteration 4 (2026-08-11, goal mode — PR #372) — CONCERN 23 DONE (both slices)
+Slice 2: the root corpus (449 test files) joins as check clause 4 — 301 errors paid to zero by
+FOUR PARALLEL fixers under a written playbook, then both lineages attacked the no-assertion-
+changes claim: codex audited all 48 changed expect-pairs (weak-assertion M on the rebuilt
+projection test — the headline contract is now actually proven with an unnamed control), grok
+caught the wire-unfaithful voice-fleet-action fixture. First recorded CROSS-LINEAGE
+DISAGREEMENT: grok passed the land-type widening, codex refuted it (fake never reaches tryLand;
+only adapter is boolean) — codex won on the code, ledgered. Root gate 5333 pass/2 fail (both
+main-inherited ratchets, fixed on #370); webapp 2002/0; 4-clause check green. 9 ledger rows.
+
+## Round 3, iteration 3 (2026-08-11, goal mode — PR #372) — CONCERN 23 SLICE 1 (webapp)
+The webapp test corpus joins the tsc program: webapp/tsconfig.tests.json = clause 3 of bun run
+check (codex verified: all 116 test files in the program, failure propagates, zero ts-nocheck).
+75 pre-existing errors across 24 files paid to zero without touching a single assertion — codex
+attacked exactly that claim and confirmed it, finding the two honest exceptions: partial voice
+bindings hidden by as-never (M — complete VoiceCallBindingDTO fixtures now) and
+SessionTypeSource requiring a name the impl deliberately tolerates missing (L — type widened to
+match the code). Native row: the cwd accident struck a THIRD time (foreground cd webapp leaked
+into a bg root-suite launch — caught by test-count sanity). Root corpus (~283 errors/119 files)
+is slice 2; concern stays open. (Iteration lines 1-2 live on their PR branches; keep-both-sides.)
 
 ## Round 2 (2026-08-04, iteration 37 — the goal's completion clause)
 Queue was dry (14 done, 3 needs-lars) → fresh review round executed: two Explore agents over

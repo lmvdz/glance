@@ -94,7 +94,7 @@ test("a NEW failure not present on base -> outcome stays failed, and the new fai
 	expect(res.text).toContain("tests/newbug.test.ts > introduced by this unit");
 	// The new-failure header comes FIRST, ahead of the full reduced dump (which still includes the
 	// pre-existing base failure too) — the fixup agent sees the signal before the noise.
-	expect(res.text.indexOf("1 NEW failure")).toBeLessThan(res.text.indexOf("0 pass"));
+	expect(res.text!.indexOf("1 NEW failure")).toBeLessThan(res.text!.indexOf("0 pass"));
 });
 
 test("NEW failure from untouched test file is excluded when the file passes in isolation", async () => {

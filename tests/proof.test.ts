@@ -136,7 +136,7 @@ test("proofGate: dirty same-commit tree invalidates a previously passing proof",
 	expect(await proofGate(repo, wt, "dirty-feat")).toBeUndefined();
 
 	await fs.writeFile(path.join(wt, "f.txt"), "changed but uncommitted\n");
-	expect(await headCommit(wt)).toBe((await proofFor(repo, wt))?.commit);
+	expect(await headCommit(wt)).toBe((await proofFor(repo, wt))?.commit as never);
 	expect(await proofGate(repo, wt, "dirty-feat")).toMatch(/uncommitted changes/);
 });
 

@@ -9,8 +9,19 @@ import { ChannelStore, type ChannelEntry } from "../src/channels.ts";
 import { SubagentTracker } from "../src/subagents.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { TRANSCRIPT_EVENT_GATE_VERDICT, TRANSCRIPT_EVENT_PR_OPENED, TRANSCRIPT_EVENT_UNIT_FAILED, TRANSCRIPT_EVENT_UNIT_SPAWNED, TRANSCRIPT_EVENT_UNIT_TURN_FINISHED, TRANSCRIPT_EVENT_VERIFICATION_RAN } from "../src/transcript-event-kinds.ts";
-import { SquadServer, type AuthInstance, type SocketData } from "../src/server.ts";
-import type { Actor, AgentDTO, PersistedAgent, SquadEvent, TranscriptEntry } from "../src/types.ts";
+import { SquadServer, type AuthInstance } from "../src/server.ts";
+import type { Actor, AgentDTO, PersistedAgent, Role, SquadEvent, TranscriptEntry } from "../src/types.ts";
+
+/** Mirrors the fields of `server.ts`'s (unexported) `SocketData` this suite actually exercises —
+ *  not the full private shape (see FLAGGED note in the fix report: SocketData isn't exported). */
+interface SocketData {
+	id?: number;
+	role: Role;
+	orgId?: string;
+	userId?: string;
+	displayName?: string;
+	bootstrapAdmin?: boolean;
+}
 
 const cleanups: Array<() => Promise<void> | void> = [];
 const sockets: WebSocket[] = [];
@@ -24,6 +35,10 @@ afterEach(async () => {
 });
 
 const actor = (userId: string): Actor => ({ id: `db:${userId}`, displayName: userId, origin: "local", role: "admin", orgId: "org-a" });
+
+/** `stateDir` is private on SquadManager; these tests need the real on-disk path to drive
+ *  `saveAnswer`/`saveAfterAction` directly against the same store the manager itself uses. */
+const stateDirOf = (mgr: SquadManager): string => (mgr as unknown as { stateDir: string }).stateDir;
 
 const agentDto = (id: string, channelId?: string): AgentDTO => ({
 	id,
@@ -159,7 +174,7 @@ function connect(url: string, userId: "alice" | "bob" | "carol"): Promise<Client
 	const ready = Promise.withResolvers<Client>();
 	const waiters: Array<{ match: (event: SquadEvent) => boolean; resolve: (event: SquadEvent) => void }> = [];
 	const messages: SquadEvent[] = [];
-	const ws = new WebSocket(url, { headers: { cookie: `session=${userId}` } });
+	const ws = new WebSocket(url, { headers: { cookie: `session=${userId}` } } as never);
 	sockets.push(ws);
 	const client: Client = {
 		ws,
@@ -254,8 +269,8 @@ test("typing events are wire-only, debounced per channel, and never persisted as
 	await mgr.applyCommand({ type: "typing", channelId: "fleet", active: true });
 
 	const frames: string[] = [];
-	const source = { data: { id: 1, userId: "alice", orgId: "org-a", role: "admin", displayName: "Alice" }, send: () => {} };
-	const peer = { data: { id: 2, userId: "bob", orgId: "org-a", role: "admin", displayName: "Bob" }, send: (frame: string) => frames.push(frame) };
+	const source: { data: SocketData; send(frame: string): void } = { data: { id: 1, userId: "alice", orgId: "org-a", role: "admin", displayName: "Alice" }, send: () => {} };
+	const peer: { data: SocketData; send(frame: string): void } = { data: { id: 2, userId: "bob", orgId: "org-a", role: "admin", displayName: "Bob" }, send: (frame: string) => frames.push(frame) };
 	const host = server as unknown as {
 		clients: Set<{ data: SocketData; send(frame: string): void }>;
 		emitTyping(source: { data: SocketData; send(frame: string): void }, manager: SquadManager, channelId: string, active: boolean): Promise<void>;
@@ -273,8 +288,8 @@ test("typing events are wire-only, debounced per channel, and never persisted as
 		{ type: "typing", channelId: "ops", userId: "db:alice", displayName: "Alice", active: true, at: expect.any(Number) },
 		{ type: "typing", channelId: "fleet", userId: "db:alice", displayName: "Alice", active: false, at: expect.any(Number) },
 	]);
-	expect(await mgr.channelEntries("fleet")).toEqual([]);
-	expect(await mgr.channelEntries("ops")).toEqual([]);
+	expect(await mgr.channelEntries("fleet", 0, actor("alice"))).toEqual([]);
+	expect(await mgr.channelEntries("ops", 0, actor("alice"))).toEqual([]);
 });
 
 test("revocation during private fan-out stops later member frames", async () => {
@@ -602,7 +617,7 @@ test("private agent events, removals, bound logs, and missing channels never fan
 		{ type: "agent", agent: unit },
 		{ type: "transcript", id: unit.id, entry: { id: "t", seq: 1, kind: "assistant", text: "private", ts: 1 } },
 		{ type: "commands", id: unit.id, commands: [] },
-		{ type: "transition", entry: { agentId: unit.id, from: "working", to: "input", reason: "private", at: 1, seq: "1" } },
+		{ type: "transition", entry: { agentId: unit.id, from: "working", to: "input", reason: "restart", at: 1, seq: "1" } },
 		{ type: "removed", id: unit.id, channelId: "ops" },
 		{ type: "log", level: "error", text: "private failure", agentId: unit.id },
 	] satisfies SquadEvent[]) await host.deliverEvent(undefined, event);
@@ -671,9 +686,9 @@ test("non-members cannot read private action items, answers, or after-actions af
 	// binding the after-action arm below carries. Before answers retained it, the only thing denying a
 	// non-member was `canReadAgent` returning false for an id it no longer knew, which is absence read
 	// as denial: protected while the agent lived, open the moment it was reaped.
-	await saveAnswer(mgr.stateDir, { id: agent.id, question: "private question", repo: agent.repo, markdown: "private answer", askedAt: 1, channelId: "ops" });
+	await saveAnswer(stateDirOf(mgr), { id: agent.id, question: "private question", repo: agent.repo, markdown: "private answer", askedAt: 1, channelId: "ops" });
 	await saveAfterAction(
-		mgr.stateDir,
+		stateDirOf(mgr),
 		composeAfterAction({
 			id: agent.id,
 			name: agent.name,
@@ -718,7 +733,7 @@ test("an answer with no retained channel binding is org-public, deliberately", a
 	// channel-bound unit records the binding, so `undefined` only ever means "pre-migration".
 	// If that ever stops being true, this test is the one that should be revisited first.
 	const { mgr, url, headers } = await startedPrivateAgentServer("legacy-answer-membership-");
-	await saveAnswer(mgr.stateDir, { id: "legacy-unit", question: "legacy question", repo: "/repo", markdown: "legacy answer", askedAt: 1 });
+	await saveAnswer(stateDirOf(mgr), { id: "legacy-unit", question: "legacy question", repo: "/repo", markdown: "legacy answer", askedAt: 1 });
 
 	const response = await fetch(`${url}/api/answers/legacy-unit`, { headers });
 	expect(response.status).toBe(200);

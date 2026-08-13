@@ -206,7 +206,7 @@ function bareRec(id: string, pending: PendingRequest[]): { dto: AgentDTO; stream
 	};
 }
 
-const streamState = (isStreaming: boolean): RpcSessionState => ({ todoPhases: [], isStreaming }) as RpcSessionState;
+const streamState = (isStreaming: boolean): RpcSessionState => ({ todoPhases: [], isStreaming }) as unknown as RpcSessionState;
 
 /** The poll-based fallback is gated behind OMP_SQUAD_PENDING_GHOST_EXPIRY (default OFF — #lifecycle-truth
  *  finding 6: it shipped without its design-mandated live acceptance test, and a host genuinely blocked

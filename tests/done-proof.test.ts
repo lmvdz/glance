@@ -158,7 +158,7 @@ function seed(mgr: TestManager, id: string, issue?: IssueRef): void {
 		issue,
 	};
 	const options: PersistedAgent = { id, name: id, repo: "/r", worktree: "/r", approvalMode: "yolo", issue };
-	mgr.agents.set(id, { dto, agent: undefined as never, options, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() });
+	mgr.agents.set(id, { dto, agent: undefined as never, options, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() } as never);
 }
 
 const trackedIssue: IssueRef = { id: "iss-1", identifier: "PROJ-1", name: "do the thing", projectId: "proj-9" };

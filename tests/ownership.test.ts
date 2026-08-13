@@ -216,13 +216,14 @@ test("goalConflict: a different repo is never a conflict, however similar the go
 
 test("goalConflict: a stopped or errored owner releases its goal, a finished one does not", () => {
 	// Matches the sibling path primitive exactly: stopped and error release, everything else holds.
-	// `done` deliberately still holds — a finished-but-unlanded unit owns its goal until it lands or is
-	// reaped off the roster, and someone starting the same work meanwhile IS duplicating it.
+	// `idle` (turn finished) deliberately still holds — a finished-but-unlanded unit owns its goal
+	// until it lands or is reaped off the roster, and someone starting the same work meanwhile IS
+	// duplicating it.
 	const goal = "add request rate limiting to the public API";
 	for (const status of ["stopped", "error"] as const) {
 		expect(goalConflict([{ name: "wren", repo: "/r", status, goal }], { name: "new", repo: "/r", status: "working", goal })).toBeUndefined();
 	}
-	expect(goalConflict([{ name: "wren", repo: "/r", status: "done", goal }], { name: "new", repo: "/r", status: "working", goal })).toMatchObject({ agent: "wren" });
+	expect(goalConflict([{ name: "wren", repo: "/r", status: "idle", goal }], { name: "new", repo: "/r", status: "working", goal })).toMatchObject({ agent: "wren" });
 });
 
 test("goalConflict: a goal too short to judge is not a conflict", () => {

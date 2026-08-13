@@ -104,7 +104,7 @@ function seedAgent(mgr: SquadManager, id: string, repo: string, worktree: string
 		featureId,
 	};
 	const options: PersistedAgent = { id, name: id, repo, worktree, approvalMode: "yolo" };
-	mgr.agents.set(id, { dto, agent: undefined as never, options, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() });
+	mgr.agents.set(id, { dto, agent: undefined as never, options, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() } as never);
 }
 
 /** A judge that marks c1 satisfied and c2 unsatisfied — a real veto. */

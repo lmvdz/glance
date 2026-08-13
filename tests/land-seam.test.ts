@@ -155,7 +155,7 @@ const realSpawn: typeof Bun.spawn = Bun.spawn.bind(Bun);
 
 beforeEach(() => {
 	spawnLog = [];
-	// @ts-expect-error — test-only monkeypatch of a global to observe every real subprocess call.
+	// biome-ignore lint: test-only monkeypatch of a global to observe every real subprocess call.
 	Bun.spawn = (argv: unknown, opts?: { cwd?: string }) => {
 		if (Array.isArray(argv)) spawnLog.push({ argv: argv.map(String), cwd: opts?.cwd });
 		// biome-ignore lint: forwarding to the real implementation
@@ -197,7 +197,7 @@ function seedAgent(mgr: InstanceType<typeof SquadManager>, id: string, repo: str
 		featureId,
 	};
 	const options: PersistedAgent = { id, name: id, repo, worktree, approvalMode: "yolo" };
-	mgr.agents.set(id, { dto, agent: undefined as never, options, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() });
+	mgr.agents.set(id, { dto, agent: undefined as never, options, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() } as never);
 }
 
 // ── land() ───────────────────────────────────────────────────────────────────────────────────────

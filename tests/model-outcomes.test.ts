@@ -8,7 +8,7 @@ import { describe, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { DEFAULT_MODEL_FAMILY, modelFamily, modelOutcomes, recordModelOutcome, recordModelOutcomeBlocked, tierOf } from "../src/model-outcomes.ts";
+import { type ComplexityTier, DEFAULT_MODEL_FAMILY, modelFamily, modelOutcomes, recordModelOutcome, recordModelOutcomeBlocked, tierOf } from "../src/model-outcomes.ts";
 import { ROUTE_CHEAP_FAMILY } from "../src/model-route.ts";
 import type { ThinkingLevel } from "../src/types.ts";
 
@@ -17,7 +17,7 @@ function tmp(): string {
 }
 
 describe("tierOf", () => {
-	const cases: [ThinkingLevel | undefined, string][] = [
+	const cases: [ThinkingLevel | undefined, ComplexityTier][] = [
 		["minimal", "light"],
 		["low", "light"],
 		["medium", "mid"],

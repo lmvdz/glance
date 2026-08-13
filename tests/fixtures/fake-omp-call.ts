@@ -218,7 +218,9 @@ export class FakeOmpCall {
 						...(this.canFleet ? { canFleet: true } : {}),
 					});
 				},
-				close: (ws) => this.sockets.delete(ws),
+				close: (ws) => {
+					this.sockets.delete(ws);
+				},
 				message: (ws, message) => this.handleControl(ws, message),
 			},
 		});

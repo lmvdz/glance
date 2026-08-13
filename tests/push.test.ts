@@ -38,7 +38,7 @@ async function decrypt(body: Buffer, uaPrivate: CryptoKey, uaPublic: Buffer, aut
 	const idlen = body.readUInt8(20);
 	const asPublic = body.subarray(21, 21 + idlen);
 	const ciphertext = body.subarray(21 + idlen);
-	const asKey = await crypto.subtle.importKey("raw", asPublic, { name: "ECDH", namedCurve: "P-256" }, false, []);
+	const asKey = await crypto.subtle.importKey("raw", asPublic as BufferSource, { name: "ECDH", namedCurve: "P-256" }, false, []);
 	const ecdhSecret = Buffer.from(new Uint8Array(await crypto.subtle.deriveBits({ name: "ECDH", public: asKey }, uaPrivate, 256)));
 	const ikm = hkdf(auth, ecdhSecret, Buffer.concat([Buffer.from("WebPush: info\0"), uaPublic, asPublic]), 32);
 	const cek = hkdf(salt, ikm, Buffer.from("Content-Encoding: aes128gcm\0"), 16);

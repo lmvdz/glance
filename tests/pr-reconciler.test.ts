@@ -630,7 +630,6 @@ test("prReconcileTick: an empty ledger and roster is a true no-op — zero gh/gi
 
 	const realSpawn = Bun.spawn.bind(Bun);
 	let spawnedGit = false;
-	// @ts-expect-error — test-only monkeypatch to observe whether ANY real subprocess call happens.
 	Bun.spawn = (argv: unknown, opts?: unknown) => {
 		if (Array.isArray(argv) && argv[0] === "git") spawnedGit = true;
 		// biome-ignore lint: forwarding to the real implementation
@@ -659,7 +658,6 @@ test("prReconcileTick: an empty ledger with a live (non-landReady) agent is stil
 
 	const realSpawn = Bun.spawn.bind(Bun);
 	let spawnedGit = false;
-	// @ts-expect-error — test-only monkeypatch to observe whether ANY real subprocess call happens.
 	Bun.spawn = (argv: unknown, opts?: unknown) => {
 		if (Array.isArray(argv) && argv[0] === "git") spawnedGit = true;
 		// biome-ignore lint: forwarding to the real implementation

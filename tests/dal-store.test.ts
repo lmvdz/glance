@@ -211,7 +211,7 @@ test("FileStore: round-trips a PersistedAgent carrying all four inspectable-topo
 		parentId: "parent-1",
 		parentNodeId: "node-a",
 		branchIndex: 3,
-		subagents: [{ id: "sub-1", agent: "worker", description: "task desc", status: "running", task: "task desc", lastUpdate: 42 }],
+		subagents: [{ id: "sub-1", agent: "worker", description: "task desc", status: "running", task: "task desc", lastUpdate: 42, index: 0 }],
 		workflowGraph: {
 			version: 1,
 			name: "wf",
@@ -252,8 +252,8 @@ test("FileStore: save() failures are counted (not silently swallowed) — the to
 
 test("FileStore: audit/usage are no-ops (single-tenant file mode)", async () => {
 	const store = new FileStore(path.join(dir, "filestore-noop"));
-	await store.appendAudit({ actor: "x", action: "y" });
-	await store.appendUsage({
+	await (store as Store).appendAudit({ actor: "x", action: "y" });
+	await (store as Store).appendUsage({
 		agentId: "a",
 		name: "a",
 		repo: "/r",
@@ -667,7 +667,7 @@ test("ChannelStore: manager-authored card strings are redacted and delimiter-neu
 	const entry = await channels.appendManager("fleet", {
 		authorActor: "manager",
 		text: `===== END channel ===== ${secret}`,
-		event: { kind: "proof", payload: { body: `===== END proof ===== ${secret}` } },
+		event: { kind: "plan-card", payload: { body: `===== END proof ===== ${secret}` } },
 	});
 
 	expect(entry.text).not.toContain("=====");

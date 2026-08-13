@@ -276,7 +276,7 @@ describe("selectAndTrackBaseline", () => {
 
 		// 1. Escalation fired.
 		expect(result.staleness.length).toBeGreaterThan(0);
-		expect(result.staleness.some((e) => e.summary.toLowerCase().includes("corrupt") || e.detail.toLowerCase().includes("corrupt"))).toBe(true);
+		expect(result.staleness.some((e) => e.summary.toLowerCase().includes("corrupt") || e.detail?.toLowerCase().includes("corrupt"))).toBe(true);
 		expect(result.staleness.some((e) => e.summary.includes("tdd:heavy"))).toBe(true);
 
 		// 2. The measurement is held, not blocked: a usable baseline still resolves off THIS round's doc
@@ -296,7 +296,7 @@ describe("selectAndTrackBaseline", () => {
 		const doc = healthyDoc("b", "sonnet");
 		const result = selectAndTrackBaseline(stateDir, doc, "tdd:heavy", { now: 13000 });
 		expect(result.staleness.length).toBeGreaterThan(0);
-		expect(result.staleness.some((e) => e.summary.toLowerCase().includes("corrupt") || e.detail.toLowerCase().includes("corrupt"))).toBe(true);
+		expect(result.staleness.some((e) => e.summary.toLowerCase().includes("corrupt") || e.detail?.toLowerCase().includes("corrupt"))).toBe(true);
 		expect(result.baseline?.model).toBe("sonnet");
 		expect(result.baseline?.pinned).toBe(false);
 	});
@@ -306,7 +306,7 @@ describe("selectAndTrackBaseline", () => {
 		const doc = healthyDoc("b", "sonnet");
 		const env = { OMP_SQUAD_BASELINE_PIN_TDD_HEAVY: "" } as unknown as NodeJS.ProcessEnv;
 		const result = selectAndTrackBaseline(stateDir, doc, "tdd:heavy", { now: 13500, env });
-		expect(result.staleness.some((e) => e.summary.toLowerCase().includes("corrupt") || e.detail.toLowerCase().includes("unparseable"))).toBe(true);
+		expect(result.staleness.some((e) => e.summary.toLowerCase().includes("corrupt") || e.detail?.toLowerCase().includes("unparseable"))).toBe(true);
 		expect(result.baseline?.model).toBe("sonnet");
 	});
 
@@ -317,7 +317,7 @@ describe("selectAndTrackBaseline", () => {
 		await fs.writeFile(path.join(stateDir, "baseline-pins.json"), JSON.stringify({ "tdd:heavy": "" }));
 		const doc = healthyDoc("b", "sonnet");
 		const result = selectAndTrackBaseline(stateDir, doc, "tdd:heavy", { now: 13600 });
-		expect(result.staleness.some((e) => e.summary.toLowerCase().includes("corrupt") || e.detail.toLowerCase().includes("unparseable"))).toBe(true);
+		expect(result.staleness.some((e) => e.summary.toLowerCase().includes("corrupt") || e.detail?.toLowerCase().includes("unparseable"))).toBe(true);
 		expect(result.baseline?.model).toBe("sonnet");
 		expect(result.baseline?.pinned).toBe(false);
 	});
@@ -327,7 +327,7 @@ describe("selectAndTrackBaseline", () => {
 		await fs.writeFile(path.join(stateDir, "baseline-pins.json"), JSON.stringify({ "tdd:heavy": 42 }));
 		const doc = healthyDoc("b", "sonnet");
 		const result = selectAndTrackBaseline(stateDir, doc, "tdd:heavy", { now: 13700 });
-		expect(result.staleness.some((e) => e.summary.toLowerCase().includes("corrupt") || e.detail.toLowerCase().includes("unparseable"))).toBe(true);
+		expect(result.staleness.some((e) => e.summary.toLowerCase().includes("corrupt") || e.detail?.toLowerCase().includes("unparseable"))).toBe(true);
 		expect(result.baseline?.model).toBe("sonnet");
 		expect(result.baseline?.pinned).toBe(false);
 	});
@@ -357,11 +357,11 @@ describe("selectAndTrackBaseline", () => {
 		// restored immediately after (`finally`) — no other test observes the mock.
 		const realReadFileSync = nodeFs.readFileSync;
 		let calls = 0;
-		const spy = spyOn(nodeFs, "readFileSync").mockImplementation((...args: Parameters<typeof nodeFs.readFileSync>) => {
+		const spy = spyOn(nodeFs, "readFileSync").mockImplementation(((...args: Parameters<typeof nodeFs.readFileSync>) => {
 			calls++;
 			if (calls === 2) throw new Error("simulated TOCTOU corruption");
 			return (realReadFileSync as (...a: unknown[]) => unknown)(...args);
-		});
+		}) as never);
 		let result!: ReturnType<typeof selectAndTrackBaseline>;
 		try {
 			expect(() => {
@@ -374,7 +374,7 @@ describe("selectAndTrackBaseline", () => {
 		// 1. The staleness event built BEFORE the write attempt (the vanished "opus" baseline) survived.
 		expect(result.staleness.some((e) => e.summary.includes("opus"))).toBe(true);
 		// 2. The write-time TOCTOU failure ALSO escalated via the same channel, not swallowed silently.
-		expect(result.staleness.some((e) => e.summary.toLowerCase().includes("corrupt") || e.detail.toLowerCase().includes("toctou"))).toBe(true);
+		expect(result.staleness.some((e) => e.summary.toLowerCase().includes("corrupt") || e.detail?.toLowerCase().includes("toctou"))).toBe(true);
 		// 3. The measurement itself is still returned — never fail-blocked on the write.
 		expect(result.baseline?.model).toBe("sonnet");
 

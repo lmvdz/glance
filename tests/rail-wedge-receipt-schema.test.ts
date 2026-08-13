@@ -61,13 +61,13 @@ test("a receipt with the minimal required fields (no optional ones) decodes", ()
 });
 
 test("an unknown gate.status literal fails decode — fail-closed, not coerced to a known value", () => {
-	const bad = { ...validReceiptJson(), gate: { ...(validReceiptJson() as { gate: object }).gate, status: "totally-made-up-status" } };
+	const bad = { ...(validReceiptJson() as Record<string, unknown>), gate: { ...((validReceiptJson() as { gate: object }).gate as Record<string, unknown>), status: "totally-made-up-status" } };
 	const r = Schema.decodeUnknownResult(LandReceiptSchema)(bad);
 	expect(Result.isFailure(r)).toBe(true);
 });
 
 test("landed as a string instead of boolean fails decode", () => {
-	const bad = { ...validReceiptJson(), landed: "true" };
+	const bad = { ...(validReceiptJson() as Record<string, unknown>), landed: "true" };
 	const r = Schema.decodeUnknownResult(LandReceiptSchema)(bad);
 	expect(Result.isFailure(r)).toBe(true);
 });
@@ -87,9 +87,9 @@ test("a completely unrelated JSON shape (e.g. an array, or a different object) f
 });
 
 test("files must be an array of strings, not a single string or mixed types", () => {
-	const bad1 = { ...validReceiptJson(), files: "src/foo.ts" };
+	const bad1 = { ...(validReceiptJson() as Record<string, unknown>), files: "src/foo.ts" };
 	expect(Result.isFailure(Schema.decodeUnknownResult(LandReceiptSchema)(bad1))).toBe(true);
-	const bad2 = { ...validReceiptJson(), files: ["src/foo.ts", 42] };
+	const bad2 = { ...(validReceiptJson() as Record<string, unknown>), files: ["src/foo.ts", 42] };
 	expect(Result.isFailure(Schema.decodeUnknownResult(LandReceiptSchema)(bad2))).toBe(true);
 });
 

@@ -3,13 +3,32 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { FileStore } from "../src/dal/store.ts";
-import { NodeRecordStore, nodeRecordKinds, quoteRule, readNodeRecord, type NodeRecord } from "../src/memory/node-records.ts";
+import {
+	NodeRecordStore,
+	nodeRecordKinds,
+	quoteRule,
+	readNodeRecord,
+	type AgentProfileRecord,
+	type DecisionRecord,
+	type DelegationBoundaryRecord,
+	type EvidenceRecord,
+	type HandoverRecord,
+	type HumanAuthorityRecord,
+	type InstructionReadbackRecord,
+	type LearningStateRecord,
+	type NodeRecord,
+	type NodeSummaryRecord,
+	type ObjectionRecord,
+	type PlanMotionRecord,
+	type RetentionRecord,
+	type RuleRecord,
+} from "../src/memory/node-records.ts";
 import type { Node } from "../src/memory/nodes.ts";
 
 async function store(opts: { seedEvidence?: boolean } = {}): Promise<{ store: FileStore; records: NodeRecordStore; dir: string }> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "node-records-"));
 	const fileStore = new FileStore(dir);
-	const node: Node = { id: "n1", kind: "unit", title: "the unit", state: "working", createdAt: 1, channelId: null };
+	const node: Node = { id: "n1", kind: "unit", title: "the unit", state: "working", createdAt: 1, channelId: undefined };
 	await fileStore.putNode(node);
 	const records = new NodeRecordStore(fileStore);
 	// A rule may only cite decisions that exist, so any test that writes one needs its evidence present.
@@ -25,7 +44,23 @@ async function store(opts: { seedEvidence?: boolean } = {}): Promise<{ store: Fi
  * hand-wrote a reader beside it, so a field the reader forgot vanished on read with no error. A
  * withdrawn rule came back withdrawn but with no withdrawal time and no pointer to its replacement.
  */
-const samples: Record<(typeof nodeRecordKinds)[number], NodeRecord> = {
+interface Samples {
+	rule: RuleRecord;
+	"delegation-boundary": DelegationBoundaryRecord;
+	"instruction-readback": InstructionReadbackRecord;
+	objection: ObjectionRecord;
+	"plan-motion": PlanMotionRecord;
+	evidence: EvidenceRecord;
+	"agent-profile": AgentProfileRecord;
+	decision: DecisionRecord;
+	"human-authority": HumanAuthorityRecord;
+	handover: HandoverRecord;
+	retention: RetentionRecord;
+	summary: NodeSummaryRecord;
+	"learning-state": LearningStateRecord;
+}
+
+const samples: Samples = {
 	rule: {
 		kind: "rule",
 		id: "r1",
@@ -318,7 +353,7 @@ test("a half-written record is dropped whole, never half-read", () => {
 
 test("records are listed in creation order and scoped to their own node", async () => {
 	const { store: fileStore, records, dir } = await store({ seedEvidence: false });
-	await fileStore.putNode({ id: "n2", kind: "unit", title: "another", state: "idle", createdAt: 1, channelId: null });
+	await fileStore.putNode({ id: "n2", kind: "unit", title: "another", state: "idle", createdAt: 1, channelId: undefined });
 	await records.put({ ...samples.evidence, id: "e-late", createdAt: 300 });
 	await records.put({ ...samples.evidence, id: "e-early", createdAt: 100 });
 	await records.put({ ...samples.evidence, id: "e-other", nodeId: "n2", createdAt: 200 });

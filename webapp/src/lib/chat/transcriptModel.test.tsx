@@ -38,7 +38,7 @@ const composerBaseProps = {
   selectedModel: "",
   modelOptions: [],
   onModelChange: () => {},
-} as const;
+};
 
 test("TranscriptEntryView renders human-first tool output with raw payload tucked away", () => {
   const entry: TranscriptEntry = {
@@ -304,9 +304,9 @@ test("normalizeAssistantSessions no longer destructively migrates agent-backed s
     updatedAt: 5,
     metadata: { agentId: "agent-1" },
     messages: [
-      { role: "model", text: "welcome", timestamp: 1 },
-      { role: "user", text: "do the thing", timestamp: 2 },
-      { role: "model", text: "on it", timestamp: 3 },
+      { role: "model" as const, text: "welcome", timestamp: 1 },
+      { role: "user" as const, text: "do the thing", timestamp: 2 },
+      { role: "model" as const, text: "on it", timestamp: 3 },
     ],
   }];
 
@@ -388,7 +388,7 @@ test("a gate appearing mid-transcript still carries data-chat-message (detection
   const agent: AgentDTO = {
     id: "a1",
     name: "chat",
-    status: "waiting",
+    status: "input",
     repo: "/home/lars/sui/omp-squad",
     worktree: "/home/lars/.omp/squad/worktrees/omp-squad-chat",
     pending: [{ id: "req-1", source: "tool", kind: "gate", title: "Approve this?", createdAt: 1 }],

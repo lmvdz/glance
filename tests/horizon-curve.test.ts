@@ -8,7 +8,7 @@ function receipt(over: Partial<RunReceipt>): RunReceipt {
 }
 
 const v = (verdict: "pass" | "veto" | "abstain" | "skipped" | "inconclusive") =>
-	({ verdict, agreement: 1, confidence: 1, perCriterion: [], rationale: "" }) as RunReceipt["validation"];
+	({ verdict, agreement: 1, confidence: 1, perCriterion: [], rationale: "" }) as unknown as RunReceipt["validation"];
 
 const MIN = 60_000;
 

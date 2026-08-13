@@ -188,7 +188,7 @@ test('spawnCardStatus: a vetoed unit must never read as "done" success — even 
     status: 'stopped',
     verificationState: 'fresh',
     landReady: true,
-    validation: { verdict: 'veto', agreement: 0, confidence: 0.9, perCriterion: [], rationale: 'broke the API contract' },
+    validation: { verdict: 'veto', ranAt: 1, agreement: 0, confidence: 0.9, perCriterion: [], rationale: 'broke the API contract' },
   });
   expect(status.status).not.toBe('done');
   expect(status.tone).not.toBe('success');
@@ -200,7 +200,7 @@ test('spawnCardStatus: an inconclusive verdict must never read as "done" success
     ...baseAgent,
     status: 'stopped',
     landReady: true,
-    validation: { verdict: 'inconclusive', agreement: 0, confidence: 0, perCriterion: [], rationale: 'diff could not be computed' },
+    validation: { verdict: 'inconclusive', ranAt: 1, agreement: 0, confidence: 0, perCriterion: [], rationale: 'diff could not be computed' },
   });
   expect(status.status).not.toBe('done');
   expect(status.tone).not.toBe('success');
@@ -211,7 +211,7 @@ test('spawnCardStatus: a PASSED verdict still reads as "done" success — held i
     ...baseAgent,
     status: 'stopped',
     verificationState: 'fresh',
-    validation: { verdict: 'pass', agreement: 1, confidence: 0.9, perCriterion: [], rationale: 'all criteria satisfied' },
+    validation: { verdict: 'pass', ranAt: 1, agreement: 1, confidence: 0.9, perCriterion: [], rationale: 'all criteria satisfied' },
   });
   expect(status.status).toBe('done');
   expect(status.tone).toBe('success');

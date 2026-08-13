@@ -47,7 +47,10 @@ function stagingOrchestrator(verified: string[]): Orchestrator {
 			verified.push(id);
 			return true;
 		},
-		land: async () => "staged",
+		// Unreachable in this test (codex, concern 23 round): holdForConfirm:true stages and
+		// returns BEFORE tick() ever calls tryLand, so this fake's value is never observed —
+		// the old "staged" return here was dead theater behind a cast.
+		land: async () => false,
 		holdForConfirm: true,
 		notifyReady: () => {},
 		log: () => {},
@@ -97,7 +100,7 @@ test("invalidate() un-halts a parked unit — that is what 'step in' means", asy
 		},
 		landAgentWork: async () => true,
 		agentHasWork: async () => true,
-		routeFailure: () => "escalate",
+		route: () => "escalate",
 		log: () => {},
 	});
 

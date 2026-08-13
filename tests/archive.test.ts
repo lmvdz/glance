@@ -186,7 +186,7 @@ async function mgr(): Promise<{ manager: SquadManager; nodeId: string; stateDir:
 	const manager = new SquadManager({ stateDir, worktreeBase });
 	await manager.start();
 	const store = new FileStore(stateDir);
-	await store.putNode({ id: "n1", kind: "unit", title: "unit", state: "working", createdAt: 1, channelId: null });
+	await store.putNode({ id: "n1", kind: "unit", title: "unit", state: "working", createdAt: 1, channelId: undefined });
 	const records = new NodeRecordStore(store);
 	for (const record of [rec("decision", "d1", OLD), rec("evidence", "e1", OLD), rec("plan-motion", "m1", OLD)]) {
 		await records.put(record);
