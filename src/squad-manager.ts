@@ -234,7 +234,6 @@ import {
 	TRANSCRIPT_EVENT_UNIT_SPAWNED,
 	TRANSCRIPT_EVENT_UNIT_TURN_FINISHED,
 	TRANSCRIPT_EVENT_VERIFICATION_RAN,
-	isTranscriptEventKind,
 } from "./transcript-event-kinds.ts";
 import { TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT, fleetTokenBurnPayload, tokenBurnFace, unitTokenBurnPayload } from "./token-burn.ts";
 import { emitDesignRevisedCard, emitGoalOverlapCard, emitMentionSteerCard, emitReturnEmitCard, emitTokenBurnSnapshotCard } from "./schema/channel-card.ts";
@@ -266,7 +265,7 @@ import {
 	type VoiceOwnerActor,
 } from "./voice-fleet.ts";
 import { NodeStore, compareActivity, type NodeState } from "./memory/nodes.ts";
-import { ForgedCardError, assertAuthentic, projectsToRoom, type CardProvenance } from "./projection-classes.ts";
+import { UnitCardProjector, type ProjectedUnitSession } from "./unit-card-projector.ts";
 import { coldStartLearningState } from "./unknowns.ts";
 import { RECOVERY_DELAY_MS, gateHealth, notificationText, readGateEvaluation, shouldLeaveTheApp, type GateEvaluation, type GateHealth, type WorthItReview } from "./leaving-the-app.ts";
 import { GateStore } from "./gate-store.ts";
@@ -1234,6 +1233,11 @@ export class SquadManager extends EventEmitter {
 	/** Durable repos-this-operator-works-in set; unioned into `projects()`. See project-registry.ts. */
 	/** Project lane (src/project-lane.ts, concern 04 island #3) — owns the registry + ephemeral markers. */
 	private readonly projectLane: ProjectLane;
+	/** Unit-card projector (src/unit-card-projector.ts, concern 21) — turns a unit's transcript events
+	 *  and pending-request deltas into room cards. `emitUnitTranscriptEvent` and `ensureProjectedNode`
+	 *  stay manager methods (both have call sites outside the projector's own funnel) and reach it
+	 *  through the deps port wired in the constructor below. */
+	private readonly cardProjector: UnitCardProjector;
 	/** Restart-safe "raced this issue already, ever" ledger (adw-factory-borrows concern 07). Consulted
 	 *  and stamped by `tryRaceOnce` — see race-ledger.ts for why this must be persisted, not in-memory. */
 	private readonly raceLedger: RaceLedger;
@@ -1282,14 +1286,6 @@ export class SquadManager extends EventEmitter {
 	private readonly superviseBudget = new Map<string, number>();
 	/** Pending authority writes keyed by agent/question, so readers observe the routing decision once it is durable. */
 	private readonly authorityWrites = new Map<string, Promise<void>>();
-	/** Manager card projections that exhausted ChannelStore's bounded append retry. */
-	private projectionFailures = 0;
-	/** First-sight-per-kind debug log for `projectUnitTranscriptEvent`'s `isTranscriptEventKind` guard
-	 *  — mirrors `schema/channel-card.ts`'s `warnedUnknownKinds` (re-port review follow-up, concern 02):
-	 *  a transcript event carrying a kind this build doesn't recognize used to be silently skipped with
-	 *  no signal anywhere; now it logs once per newly-seen kind rather than either staying silent or
-	 *  spamming a line per emit (a chatty unit could emit the same unknown kind hundreds of times). */
-	private readonly warnedUnknownTranscriptEventKinds = new Set<string>();
 	/** Per-agent count of advisory peer messages spent this run (OMP_SQUAD_PEERMSG_BUDGET). */
 	private readonly peerMessageBudget = new Map<string, number>();
 	/** Agent ids the daemon reattached to (surviving hosts) this run. */
@@ -1442,6 +1438,23 @@ export class SquadManager extends EventEmitter {
 		this.store = opts.store ?? new FileStore(this.stateDir);
 		this.channelStore = new ChannelStore(this.stateDir, this.store, (m) => this.log("warn", `channels: ${m}`));
 		this.nodeStore = new NodeStore(this.store);
+		this.cardProjector = new UnitCardProjector({
+			log: (level, msg) => this.log(level, msg),
+			node: (rec) => this.ensureProjectedNode(rec),
+			appendCard: async (target, input) => {
+				const card = "room" in target
+					? await this.channelStore.appendManager(target.room, input)
+					: await this.channelStore.appendNodeManager(target.nodeId, input, target.inheritedFromChannelId);
+				this.emit("event", { type: "channel-entry", channelId: card.channelId, entry: card } satisfies SquadEvent);
+				return card;
+			},
+			emitUnitTranscriptEvent: (id, kind, text, payload) => this.emitUnitTranscriptEvent(id, kind, text, payload),
+			label: (value) => this.safeEventLabel(value),
+			operatorId: () => this.operator.id,
+			isSettling: (id) => this.settling.has(id),
+			roomWorthy: (req) => isRoomWorthyPending(req),
+			gateClassOf: (req) => gateClassOf(req),
+		});
 		this.attentionStore = new AttentionStore({ stateDir: this.stateDir, log: (m) => this.log("warn", `attention: ${m}`) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
@@ -10332,7 +10345,7 @@ export class SquadManager extends EventEmitter {
 			liveArmed,
 			activeAgents: occupyingAgents(this.list()),
 			persistFailures: this.store.saveFailures?.() ?? 0,
-			projectionFailures: this.projectionFailures,
+			projectionFailures: this.cardProjector.projectionFailures,
 			// Shadow-exit surface (adw-factory-borrows concern 09): raw events, not rollup rows — the
 			// scoreboard needs a JOINT filter (e.g. mode=shadow AND action=ask/deny) a per-tag-key rollup
 			// breakdown can't answer. Same window every other row on this strip uses.
@@ -11357,7 +11370,7 @@ export class SquadManager extends EventEmitter {
 	 *  redaction chokepoint doesn't already cover (#lifecycle-truth concern 02). */
 	private setPending(rec: AgentRecord, next: PendingRequest[], reason: DerivedReason, cause?: TransitionCause, opts?: { callerOwnsStatus?: boolean }): void {
 		const redacted = next.map((p) => ({ ...p, title: redact(p.title), message: p.message === undefined ? undefined : redact(p.message) }));
-		this.emitNeedsYouProjection(rec, redacted, reason);
+		this.cardProjector.needsYou(rec, redacted, reason);
 		rec.dto.pending = redacted;
 		// Debounced persist trigger (concern 04) — scheduled regardless of the callerOwnsStatus branch
 		// below, since `pending` already changed above either way. Suppressed during the replay settle
@@ -11957,7 +11970,7 @@ export class SquadManager extends EventEmitter {
 	// room-scoping this lane owns: only units of the call's own channel are visible or addressable.
 
 	/** Room roster for the fleet lane: every live unit whose room is this channel (a unit with no
-	 *  channelId belongs to the default room, mirroring `projectUnitTranscriptEvent`'s own rule). */
+	 *  channelId belongs to the default room, mirroring `UnitCardProjector.event`'s own rule). */
 	private voiceFleetUnits(channelId: string): FleetUnitView[] {
 		return this.list()
 			.filter((dto) => (dto.channelId ?? DEFAULT_CHANNEL_ID) === channelId)
@@ -12269,11 +12282,12 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/** Project a card to the unit's room channel WITHOUT writing a row into the unit's transcript.
-	 *  The synthetic entry carries no `id`, so `projectionRefs` correctly omits `entryId` — there is no
-	 *  transcript row to link back to, and claiming one would be a dead reference in the card's door. */
+	 *  The synthetic entry carries no `id`, so the projector's own `refs()` correctly omits `entryId`
+	 *  — there is no transcript row to link back to, and claiming one would be a dead reference in the
+	 *  card's door. */
 	private projectLifecycleCard(rec: AgentRecord, kind: string, text: string, payload: unknown): void {
 		const synthetic: TranscriptEntry = { kind: "system", text: this.eventText(text), ts: Date.now(), status: "ok", format: "stage", event: { kind, issuer: EVENT_ISSUER_MANAGER, payload } } as TranscriptEntry;
-		void this.projectUnitTranscriptEvent(rec, synthetic);
+		void this.cardProjector.event(rec, synthetic);
 	}
 
 	private emitUnitTranscriptEvent(id: string | undefined, kind: string, text: string, payload: unknown): void {
@@ -12281,7 +12295,7 @@ export class SquadManager extends EventEmitter {
 		const rec = this.agents.get(id);
 		if (!rec || !Array.isArray(rec.transcript)) return;
 		const entry = this.append(rec, "system", this.eventText(text), { status: "ok", format: "stage", event: { kind, issuer: EVENT_ISSUER_MANAGER, payload } });
-		void this.projectUnitTranscriptEvent(rec, entry);
+		void this.cardProjector.event(rec, entry);
 	}
 
 	/** Resolve an event's subject before routing it. Missing bindings are failures, never root fallbacks. */
@@ -12294,7 +12308,10 @@ export class SquadManager extends EventEmitter {
 		}
 	}
 
-	private async ensureProjectedNode(rec: AgentRecord): Promise<{ id: string }> {
+	// Takes the projector's structural slice rather than AgentRecord: the projector's `node` dep
+	// calls this with a ProjectedUnitSession, and the slice declares exactly what this reads
+	// (dto + options.task) — every AgentRecord caller satisfies it for free.
+	private async ensureProjectedNode(rec: ProjectedUnitSession): Promise<{ id: string }> {
 		const existing = await this.nodeStore.get(rec.dto.id);
 		if (existing) return existing;
 		return this.nodeStore.create({
@@ -12306,127 +12323,6 @@ export class SquadManager extends EventEmitter {
 			goal: rec.options.task,
 			createdAt: Date.now(),
 		});
-	}
-
-	private projectionDoorSurface(kind: string): string {
-		switch (kind) {
-			case TRANSCRIPT_EVENT_NEEDS_YOU:
-				return "intervence";
-			case TRANSCRIPT_EVENT_GATE_VERDICT:
-				return "gate-verdict";
-			case TRANSCRIPT_EVENT_LAND_MERGE:
-				return "land-merge";
-			case TRANSCRIPT_EVENT_PLAN_CARD:
-				return "plan";
-			case TRANSCRIPT_EVENT_LAND_ATTEMPT:
-			case TRANSCRIPT_EVENT_LAND_ASSESSMENT:
-				return "land";
-			default:
-				return "unit";
-		}
-	}
-
-	private projectionPayload(entry: TranscriptEntry): Record<string, unknown> {
-		const payload = entry.event?.payload;
-		return payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
-	}
-
-	private projectionRefs(rec: AgentRecord, entry: TranscriptEntry): Record<string, unknown> {
-		const objectPayload = this.projectionPayload(entry);
-		const refs: Record<string, unknown> = { unitId: rec.dto.id };
-		if (entry.id) refs.entryId = entry.id;
-		for (const [from, to] of [["featureId", "planId"], ["planPath", "planPath"], ["candidateId", "candidateId"], ["attemptId", "landId"], ["issueId", "issueId"], ["issueIdentifier", "issueIdentifier"]] as const) {
-			const value = objectPayload[from];
-			if (typeof value === "string" && value) refs[to] = value;
-		}
-		return refs;
-	}
-
-	private needsYouFace(rec: AgentRecord, payload: Record<string, unknown>, entry: TranscriptEntry): Record<string, unknown> {
-		const pendingStatus = typeof payload.status === "string" ? payload.status : undefined;
-		const title = typeof payload.title === "string" && payload.title ? payload.title : "operator input";
-		const accountableHuman = typeof payload.accountableHuman === "string" && payload.accountableHuman ? payload.accountableHuman : undefined;
-		const message = typeof payload.message === "string" && payload.message ? payload.message : undefined;
-		const createdAt = typeof payload.createdAt === "number" && Number.isFinite(payload.createdAt) ? payload.createdAt : entry.ts;
-		const ageMs = Math.max(0, entry.ts - createdAt);
-		const age = ageMs < 60_000 ? "just now" : `${Math.floor(ageMs / 60_000)}m`;
-		const resolved = pendingStatus === "resolved";
-		// A resolved card is one of two facts, and they are not close: somebody answered, or the unit
-		// went away without an answer. `answered` is stamped by emitNeedsYouProjection from the same
-		// `reason` that already distinguishes them; an OLD card carries no flag and is read as
-		// answered, which is what it always claimed.
-		const abandoned = resolved && payload.answered === false;
-		// Concern 19 wants ONE NAMED accountable human, and a name is the point. In file mode the actor
-		// id is literally "local", so appending it produces "local is accountable", which names nobody
-		// and lengthens every headline to say it. An unnamed operator is left off rather than rendered
-		// as a name — an identifier that identifies no one is worse than silence, because it reads like
-		// an answer. The accountable id still rides on the payload for anyone who can resolve it.
-		const namedTitle = accountableHuman && accountableHuman !== "local" ? `${title} — ${accountableHuman} is accountable.` : title;
-		return {
-			unitId: rec.dto.id,
-			unitName: rec.dto.name,
-			eventKind: entry.event?.kind,
-			pendingId: typeof payload.pendingId === "string" ? payload.pendingId : undefined,
-			pendingStatus,
-			accountableHuman,
-			title: abandoned ? `Never answered · ${namedTitle}` : resolved ? `Resolved · ${namedTitle}` : `Needs you · ${namedTitle}`,
-			eyebrow: abandoned ? "Never answered" : resolved ? "Resolved" : "Needs you",
-			// A card that says the same sentence three times (title, body, "why stopped") reads as
-			// broken, and for approval-shaped pendings `message` IS the title. Say it once.
-			body: message && message.trim() !== title.trim() ? message : undefined,
-			detail: abandoned
-				? "The unit stopped before anyone replied. Nothing is waiting on you for it, and nothing came of it."
-				: resolved
-					? "Follow-up resolution card. Original pending card remains unchanged."
-					: "Click to step into the agent.",
-			// Abandoned is NOT success. A green card for a question nobody answered is the room
-			// congratulating itself for losing something.
-			tone: abandoned ? "neutral" : resolved ? "success" : "warning",
-			pinned: {
-				agent: rec.dto.name || rec.dto.id,
-				age,
-			},
-		};
-	}
-
-	private projectionFace(rec: AgentRecord, entry: TranscriptEntry): Record<string, unknown> {
-		const objectPayload = this.projectionPayload(entry);
-		const customFace = objectPayload.face && typeof objectPayload.face === "object" && !Array.isArray(objectPayload.face) ? objectPayload.face as Record<string, unknown> : {};
-		if (entry.event?.kind === TRANSCRIPT_EVENT_NEEDS_YOU) return this.needsYouFace(rec, objectPayload, entry);
-		if (entry.event?.kind === TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT) return tokenBurnFace(objectPayload as never);
-		return {
-			...customFace,
-			unitId: rec.dto.id,
-			unitName: rec.dto.name,
-			status: typeof customFace.status === "string" ? customFace.status : rec.dto.status,
-			repo: rec.dto.repo,
-			branch: rec.dto.branch,
-			issue: rec.dto.issue ? { id: rec.dto.issue.id, identifier: rec.dto.issue.identifier, name: rec.dto.issue.name } : undefined,
-			eventKind: entry.event?.kind,
-			title: typeof customFace.title === "string" ? customFace.title : entry.text,
-			stage: typeof objectPayload.stage === "string" ? objectPayload.stage : undefined,
-			sha: typeof objectPayload.sha === "string" ? objectPayload.sha : typeof objectPayload.resultCommit === "string" ? objectPayload.resultCommit : rec.dto.proof?.commit,
-			target: typeof objectPayload.target === "string" ? objectPayload.target : typeof objectPayload.baseRef === "string" ? objectPayload.baseRef : "HEAD",
-			risk: typeof objectPayload.risk === "string" ? objectPayload.risk : typeof objectPayload.riskTier === "string" ? objectPayload.riskTier : typeof objectPayload.code === "string" ? objectPayload.code : undefined,
-			recommendation: typeof objectPayload.recommendation === "string" ? objectPayload.recommendation : typeof objectPayload.recommendedAction === "string" ? objectPayload.recommendedAction : undefined,
-			detail: typeof objectPayload.detail === "string" ? objectPayload.detail : typeof objectPayload.message === "string" ? objectPayload.message : undefined,
-			outcome: typeof objectPayload.outcome === "string" ? objectPayload.outcome : typeof objectPayload.prState === "string" ? objectPayload.prState : undefined,
-			mode: typeof objectPayload.mode === "string" ? objectPayload.mode : undefined,
-			prUrl: typeof objectPayload.prUrl === "string" ? objectPayload.prUrl : undefined,
-			prNumber: typeof objectPayload.prNumber === "number" || typeof objectPayload.prNumber === "string" ? objectPayload.prNumber : undefined,
-			doneProofVerified: typeof objectPayload.doneProofVerified === "string" ? objectPayload.doneProofVerified : undefined,
-			verdict: typeof objectPayload.verdict === "string" ? objectPayload.verdict : undefined,
-			ok: typeof objectPayload.ok === "boolean" ? objectPayload.ok : undefined,
-			merged: typeof objectPayload.merged === "boolean" ? objectPayload.merged : undefined,
-			pendingId: typeof objectPayload.pendingId === "string" ? objectPayload.pendingId : undefined,
-			pendingStatus: typeof objectPayload.status === "string" ? objectPayload.status : undefined,
-			validation: entry.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT ? objectPayload : undefined,
-			agreement: typeof objectPayload.agreement === "number" ? objectPayload.agreement : undefined,
-			confidence: typeof objectPayload.confidence === "number" ? objectPayload.confidence : undefined,
-			perCriterion: Array.isArray(objectPayload.perCriterion) ? objectPayload.perCriterion : undefined,
-			planName: typeof objectPayload.planName === "string" ? objectPayload.planName : undefined,
-			concernCount: typeof objectPayload.concernCount === "number" ? objectPayload.concernCount : undefined,
-		};
 	}
 
 	private async emitFleetTokenBurnRollup(verdict: CostVerdict): Promise<void> {
@@ -12442,129 +12338,6 @@ export class SquadManager extends EventEmitter {
 			this.emit("event", { type: "channel-entry", channelId: DEFAULT_CHANNEL_ID, entry: card } satisfies SquadEvent);
 		} catch (err) {
 			this.log("warn", `fleet token-burn rollup failed: ${errText(err)}`);
-		}
-	}
-
-	private async projectUnitTranscriptEvent(rec: AgentRecord, entry: TranscriptEntry): Promise<void> {
-		const event = entry.event;
-		if (!event?.kind) return;
-		if (!isTranscriptEventKind(event.kind)) {
-			if (!this.warnedUnknownTranscriptEventKinds.has(event.kind)) {
-				this.warnedUnknownTranscriptEventKinds.add(event.kind);
-				this.log("warn", `projection ${rec.dto.id}: unknown transcript event kind "${event.kind}" — skipped (newer daemon, or unregistered kind; logged once)`);
-			}
-			return;
-		}
-		const nodeId = await this.projectedNodeId(rec);
-		if (!nodeId) return;
-		try {
-			const input = {
-				authorActor: "manager",
-				kind: "system" as const,
-				format: "stage" as const,
-				text: entry.text,
-				event: {
-					kind: event.kind,
-					payload: {
-						refs: this.projectionRefs(rec, entry),
-						doorSurface: this.projectionDoorSurface(event.kind),
-						face: this.projectionFace(rec, entry),
-					},
-				},
-			};
-			// An escalation surfaces in the unit's ROOM, which is the channel it was spawned from —
-			// NOT unconditionally in #fleet. #fleet is org-public, so routing every escalation there
-			// would publish a private room's needs-you, gate and land cards to the whole org.
-			const room = rec.options.channelId ?? rec.dto.channelId ?? DEFAULT_CHANNEL_ID;
-			// Provenance travels WITH the card and is checked before it is written. A unit may say
-			// anything about itself and nothing about anyone else, so a card whose subject is a
-			// different node is a forgery regardless of which emit site produced it.
-			const provenance: CardProvenance = {
-				nodeId,
-				agentId: rec.dto.id,
-				evidenceIds: Object.values(this.projectionRefs(rec, entry)).filter((ref): ref is string => typeof ref === "string" && ref.length > 0),
-			};
-			assertAuthentic(event.kind, provenance, nodeId);
-			const projectedInput = { ...input, event: { ...input.event, payload: { ...input.event.payload, provenance } } };
-			const card = projectsToRoom(event.kind)
-				? await this.channelStore.appendManager(room, projectedInput)
-				: await this.channelStore.appendNodeManager(nodeId, projectedInput, rec.options.channelId ?? rec.dto.channelId);
-			this.emit("event", { type: "channel-entry", channelId: card.channelId, entry: card } satisfies SquadEvent);
-		} catch (err) {
-			this.projectionFailures++;
-			// A forgery is not a transient failure and must not read as one in the log. A projection that
-			// could not be written is worth retrying; a card that claimed to be about someone else's work
-			// is worth investigating.
-			const label = err instanceof ForgedCardError ? "REFUSED as forged" : "failed";
-			this.log("warn", `projection ${rec.dto.id}/${event.kind} → ${nodeId} ${label} (${this.projectionFailures} total): ${errText(err)}`);
-		}
-	}
-
-	/**
-	 * Announce a pending ONCE — not once per daemon restart.
-	 *
-	 * Seen live, in the room, on real data: `gate_1` was announced thirteen times and `gate_2` three,
-	 * for two questions. The timestamps matched the daemon's restarts exactly. On boot a record is
-	 * rebuilt with an empty `pending`, replay re-adds the outstanding requests, and the id-diff below
-	 * correctly reports every one of them as new — because to a freshly constructed record, it is.
-	 *
-	 * The room's own fold hides the repeats, which is why this survived: the SCREEN looked right. But
-	 * the channel is the durable record, and everything else reading it — search, the weekly episode,
-	 * a digest, anyone scrolling back — saw one unanswered question thirteen times. A restart is not
-	 * news about the work.
-	 *
-	 * `this.settling` is the existing replay-window marker; it already suppresses the PERSIST directly
-	 * below the call site, for the same reason and in the same words ("a ghost pending rebuilt by ring
-	 * replay must never resurrect a stale question"). This extends that reasoning to the projection,
-	 * which is where a person actually meets it.
-	 *
-	 * Resolutions are deliberately NOT suppressed. A question that was answered while the daemon was
-	 * down is news, and the worse failure is a room still showing something as waiting when it is not.
-	 */
-	private emitNeedsYouProjection(rec: AgentRecord, next: PendingRequest[], reason?: DerivedReason): void {
-		const replaying = this.settling.has(rec.dto.id);
-		const previous = new Map(rec.dto.pending.map((request) => [request.id, request]));
-		const upcoming = new Map(next.map((request) => [request.id, request]));
-		for (const request of next) {
-			if (previous.has(request.id)) continue;
-			// A pending restored by replay was announced before the restart. Re-announcing it says the
-			// fleet stopped again, which it did not.
-			if (replaying) continue;
-			if (!isRoomWorthyPending(request)) continue;
-			this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, `${this.safeEventLabel(request.title)} — ${this.safeEventLabel(rec.dto.name)} stopped rather than guess. Everything else in the fleet is still moving.`, {
-				status: "pending",
-				pendingId: request.id,
-				gateClass: gateClassOf(request),
-				title: request.title,
-				accountableHuman: this.operator.id,
-				message: request.message,
-				createdAt: request.createdAt,
-				agentId: rec.dto.id,
-			});
-		}
-		for (const request of previous.values()) {
-			if (upcoming.has(request.id)) continue;
-			// Symmetric with the emit above: a pending that never became a card must never emit a
-			// resolution card, or the room fills with orphan "resolved" faces for facts it never showed.
-			if (!isRoomWorthyPending(request)) continue;
-			// A pending goes away for two very different reasons and the card said "is answered" for
-			// both. `pending-cancel` is the unit being stopped, killed, reaped or replay-pruned —
-			// nobody answered it and nothing is picking the work back up. Telling a person their
-			// question was answered when it was abandoned is the room lying about the one thing it
-			// exists to be trusted on. The distinction was already in `reason`; it was just not read.
-			const answered = reason !== "pending-cancel";
-			this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, answered
-				? `${this.safeEventLabel(request.title)} is answered. ${this.safeEventLabel(rec.dto.name)} picks the work back up from where it stopped.`
-				: `${this.safeEventLabel(request.title)} went away without being answered — ${this.safeEventLabel(rec.dto.name)} stopped before anyone replied. Nothing is waiting on you for it any more, and nothing came of it either.`, {
-				status: "resolved",
-				answered,
-				pendingId: request.id,
-				gateClass: gateClassOf(request),
-				title: request.title,
-				accountableHuman: this.operator.id,
-				createdAt: request.createdAt,
-				agentId: rec.dto.id,
-			});
 		}
 	}
 
