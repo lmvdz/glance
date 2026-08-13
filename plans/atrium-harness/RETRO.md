@@ -248,3 +248,46 @@ and Phase 5 needs P1 (certifiable window) + P3 (interpretation exclusion) as atr
 plus a P2 attention-reconcile serialization satisfiable either side — all moot until P1, which is
 THE gating decision. A doc that says precisely what atrium must build first, verified against
 atrium's code by two lineages, is a stronger Phase-5 input than one claiming more is solved.
+
+## 2026-08-12 — CAMPAIGN COMPLETE: all three artifacts delivered
+
+The goal held all three artifacts to the same standard and delivered them:
+- **Artifact 1 (rail proven at home)** = the dogfood-READINESS build: B2 self-land measured
+  (#391, 4 rounds), B3 receipts+wedge+verdict-table (#392, SOUND), B4 tenant-manifest
+  fail-closed (#393, 5 rounds). The self-land path can now route glance's own PRs through the
+  rail and produce validator-stamped, precision-measured receipts — the machinery #362's window
+  needs. Lars still starts and verdicts the window.
+- **Artifact 2 (second-tenant capability)** = B5 (#394, 4 gauntlet rounds): a disposable
+  foreign-stack fixture (pnpm/Node) driven through the REAL rail — all five rigged-red rows
+  refuse with distinct reasons (triple-pinned), the green row lands via a real ff-merge + real
+  compose-Postgres + real bun-test, receipt carrying per-gate counts. Proven, and proven
+  DETERMINISTIC (9/9) after codex caught a stdout-flush footgun that made it timing-flaky.
+- **Artifact 3 (Phase-5 bridge doc)** = #388, 5 rounds: an honest decision input for atrium's
+  own future gauntlet — no machine reaches ✓; P1+P3 atrium migrations + P2 coordination, all
+  moot until P1.
+
+**The number that matters: zero fail-opens shipped across 15 build/fix/confirm rounds and ~70
+adjudicated cross-lineage ledger rows.** And the campaign's central claim earned by
+demonstration, not assertion — THREE cross-lineage catches where one capable lineage verified a
+surface property and the second found the defect just past it:
+1. B4: grok found the env allowlist's seam coverage; codex found the fix's own `COMPOSE_*`
+   prefix admission reopened the leak via `COMPOSE_ENV_FILES` (proven live).
+2. Bridge: opus verified row-idempotency of the attention persist; codex found the TOCTOU that
+   resurrects a dismissed item (read outside the write tx + unconditional upsert).
+3. B5: opus traced every matrix row SOUND; codex found R6 could report PASS on a rail refusal,
+   then found the `process.exit()` flush footgun that made the proof pass or fail on timing.
+Each was verified against code before acceptance. That is the empirical case for the
+both-lineage-on-trust rule — not two-is-better in the abstract, but that each lineage has a
+characteristic depth-of-first-look and the defects live one level past it.
+
+Merge-train sim (throwaway, dependency order): **b2→b3 lands clean on main; b4→b5 then conflicts
+on exactly ONE ~16-line hunk in `src/land-pr.ts`** (self-land's `--match-head-commit` PR-merge
+block meets the tenant-gate PR path). `land.ts` merges clean despite all four chains editing it.
+Small, named, hand-resolvable. Bridge doc + this docs lane are code-free and independent.
+
+Terminal state: T-FINAL #389 (atrium runs as the rail's second tenant) stays enriched and
+BLOCKED by design — blocked-by Lars's dogfood verdict AND an explicit Lars go. The campaign
+delivered the readiness; the go is his. Three open calls are his alone: start the #362 dogfood
+window; rule on the C-2 concurrent-queue limitation (base-tree binding, scoped to a named
+limitation across B2/B3 — a build ticket if he wants concurrent-queue support); merge the draft
+branches (b2→b3, b4→b5 stacked order, the one land-pr.ts conflict, bridge doc, docs PR #390).
