@@ -291,3 +291,32 @@ delivered the readiness; the go is his. Three open calls are his alone: start th
 window; rule on the C-2 concurrent-queue limitation (base-tree binding, scoped to a named
 limitation across B2/B3 — a build ticket if he wants concurrent-queue support); merge the draft
 branches (b2→b3, b4→b5 stacked order, the one land-pr.ts conflict, bridge doc, docs PR #390).
+
+## 2026-08-12 — post-campaign: merge-ready integration built (Lars asked)
+
+Lars asked for a merge-ready integration rather than leaving five stacked drafts to rot. The
+merge-train "one small conflict" I'd reported turned out to be a SEMANTIC one — self-land (b2/b3)
+and tenant-gate (b4/b5) had each independently added `--match-head-commit` to `landAgentPrOnce`
+via different mechanisms (`expectHeadOid`+`prMergeArgs` helper vs `gatedBranchTip`+inline
+`mergeArgv`), because I dispatched them as parallel branches off main. Correcting my own
+mischaracterization and surfacing it as a fork (per Lars's new "ask at forks" feedback) was the
+right call — a blind textual resolution would have merged twice or dropped a lane's CAS.
+
+Reconciliation (opus builder, then codex gauntlet): ONE merge call, `matchHead =
+opts.expectHeadOid ?? gatedBranchTip` — self-land's stricter helper as the mechanism, the
+tenant-gate lane's gated tip as fallback so its server-side CAS is NOT silently lost (the
+load-bearing point). All 12 guards from both chains survive, in order. codex verdict SOUND: no
+guard dropped/doubled/misordered, single merge, both lanes bind correctly. It flagged one Medium
+— an empty `gatedBranchTip` from `git rev-parse` silently dropping the CAS on a normal land,
+INHERITED from b5, not introduced — which I closed anyway (zero-fail-open standard) with a single
+fail-closed guard: `matchHead` must be 40-hex before the merge or the land refuses (closes the
+Medium AND the empty-`expectHeadOid` Low in one line, land-pr.ts:1197, with a refusal test proving
+`mergeCalls===0`).
+
+Deliverable: **`campaign/atrium-harness-integration`** — 24 commits ahead of main, the five code
+drafts collapsed into one gate-verified branch (bun run check clean; land-path suites 107/0 incl.
+the new guard test; full root 5508 pass / 2 skip / 2 known-fails — error-message-idiom inherited +
+one isolated WS flake; B5 matrix 9/0 with docker). Merges (b2→b3) clean, (b4→b5) reconciled. One
+merge decision for Lars instead of five stacked reviews; the concrete prerequisite to #362. Still
+never merged to main — his call. The bridge doc (campaign/phase5-bridge) and this docs lane
+(PR #390) remain separate and code-free.
