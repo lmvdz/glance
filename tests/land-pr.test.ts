@@ -635,6 +635,35 @@ test("C-4 (round 3): a mid-window head move → gh refuses (--match-head-commit)
 	expect(mergeCalls[0]).toContain("--match-head-commit");
 });
 
+test("fail-closed: an unresolved gated head SHA (empty match head) REFUSES before gh pr merge, never merging unbound", async () => {
+	// Codex gauntlet Medium (inherited from b5) + Low: `matchHead = expectHeadOid ?? gatedBranchTip`
+	// binds the merge via `--match-head-commit`. If that head is empty — a failed `git rev-parse <branch>`
+	// yielding an empty `gatedBranchTip` on a normal land, OR an empty-string `expectHeadOid` — it would
+	// slip past `prMergeArgs`'s falsy push-guard and merge a tree bound to NOTHING (the exact window race
+	// the guard exists to close). Both empty-sources funnel through the SAME guard line; we drive it here
+	// via `expectHeadOid: ""` (the directly-injectable lane) and assert the land fails CLOSED — refused,
+	// `gh pr merge` never invoked.
+	const { repo } = await baseline("lp-empty-matchhead-");
+	const wt = await branchWorktree(repo, "squad/a1", { "feature.txt": "new\n" });
+	const stateDir = await tmpDir("lp-empty-matchhead-state-");
+	const gatedTip = await gitOut(repo, "rev-parse", "squad/a1");
+	// An OPEN PR to adopt (non-mutating adopt accepts it under the empty head), plus the live re-read the
+	// under-lock merge guard performs — both must pass so execution REACHES the match-head guard.
+	prList = [{ number: 200, url: "https://github.com/acme/app/pull/200", state: "OPEN", headRefOid: gatedTip }];
+	prViewResponse = { number: 200, url: "https://github.com/acme/app/pull/200", state: "OPEN", headRefOid: gatedTip };
+	mergeSimulator = githubMerge("squad/a1"); // wired but must never fire
+
+	const res = await landAgentPr(
+		{ repo, worktree: wt, branch: "squad/a1", message: "m", commitWip: false, defaultBranch: "main", expectHeadOid: "" },
+		stateDir,
+	);
+
+	expect(res.ok).toBe(false);
+	expect(res.merged).toBe(false);
+	expect(res.detail).toContain("could not resolve the gated head SHA to bind the merge");
+	expect(mergeCalls.length).toBe(0); // refused BEFORE gh pr merge — no unbound tree ever reached GitHub
+});
+
 test("landAgentPr: OMP_SQUAD_CONFLICT_MARKER_GATE=0 disables the gate globally in PR mode too", async () => {
 	process.env.OMP_SQUAD_CONFLICT_MARKER_GATE = "0";
 	try {

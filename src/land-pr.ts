@@ -1188,6 +1188,14 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 	// read (H2) merges under a stale proof and slips past assertMerged's ancestry check. The tree the
 	// gate measured is the ONLY tree that can merge.
 	const matchHead = opts.expectHeadOid ?? gatedBranchTip;
+	// Fail CLOSED if the gated head SHA is not a real 40-hex commit (codex gauntlet, Medium). `matchHead`
+	// binds the merge via `--match-head-commit`; an empty `gatedBranchTip` (a failed `git rev-parse
+	// <branch>`) or an empty-string `expectHeadOid` would slip past `prMergeArgs`'s falsy push-guard and
+	// merge a tree bound to NOTHING — the exact window race both chains built this guard to close. No
+	// PR-mode land may reach `gh pr merge` without a resolved 40-hex head, whichever lane supplied it.
+	if (!/^[0-9a-f]{40}$/.test(matchHead)) {
+		return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `self-land/tenant-gate: could not resolve the gated head SHA to bind the merge (--match-head-commit) — refusing rather than merging a tree not bound to the exact commit the gate proved (matchHead="${matchHead.slice(0, 20)}")` };
+	}
 	const merged = await gh(prMergeArgs(ensure.prNumber, method, repoSlug, matchHead), repo);
 	if (merged.code !== 0) return { ok: false, committed, merged: false, retryable: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "open", detail: `gh pr merge failed${matchHead ? " (head may have moved since it was gated — --match-head-commit refused)" : ""}: ${merged.stderr || merged.stdout}` };
 
