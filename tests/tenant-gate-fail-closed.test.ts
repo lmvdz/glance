@@ -1,7 +1,16 @@
 import { expect, test, describe } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { missingCommandRefusal, runManifestGates, type GateCommandRunner } from "../src/tenant-gate-run.ts";
 import { composeFileFor, startGateServices } from "../src/tenant-services.ts";
 import { decodeTenantGateManifest, type TenantGate, type TenantGateManifest } from "../src/tenant-gates.ts";
+
+/** Live `docker compose config` is the definitive C-1 proof; gated so the suite still runs where
+ *  docker is absent. `config` only RESOLVES the file — it starts nothing, so there is nothing to tear down. */
+const dockerUp = await (async () => {
+	try { return (await Bun.spawn(["docker", "version"], { stdout: "ignore", stderr: "ignore" }).exited) === 0; } catch { return false; }
+})();
 
 /**
  * G2 #386's rigged-red matrix, one row per test, each asserting a DISTINCT refusal code and reason.
@@ -386,22 +395,100 @@ describe("Round 4 (SECURITY) — the allowlist reaches EVERY env-handing seam, n
 		}
 	});
 
-	test("L-1 runtime floor: even if a secret-shaped name reaches tenantGateEnv's allow, it is NOT admitted", async () => {
-		// Defense-in-depth behind the decode-time reject: the runtime allowlist floor rejects it too.
+	test("L-1 runtime floor: secret-shaped names PLACED IN the raw allow set are still dropped (removing the floor would fail this)", async () => {
+		// codex round-4 L-1: the old version fed only ["PATH"], so removing the floor wouldn't fail it.
+		// Here the secret-shaped names ARE the allow set — the ONLY thing keeping them out is the floor.
 		await withSecrets(async () => {
 			let captured: Record<string, string> | undefined;
-			// `env` allowlist here bypasses decode (constructed raw), simulating any path that reaches the
-			// runtime env builder with a secret-shaped name — the floor still drops it.
 			await runManifestGates({
-				manifest: { version: 1, repo: "/repo", policy: { sandboxStrict: false, env: ["PATH"] }, gates: [{ name: "t", command: "x", timeoutMs: 1000, expects: { exit: 0, parser: "raw" } }] },
+				manifest: { version: 1, repo: "/repo", policy: { sandboxStrict: false, env: ["DATABASE_URL", "VENDOR_API_KEY", "SESSION_TOKEN", "SECRET_CANARY"] }, gates: [{ name: "t", command: "x", timeoutMs: 1000, expects: { exit: 0, parser: "raw" } }] },
 				cwd: "/wt",
 				dockerProbe: hasDocker,
 				exec: async (_c, _cwd, o) => { captured = o.env; return { code: 0, stdout: "", stderr: "", sandboxed: true }; },
 			});
+			// Each was explicitly named in policy.env AND set on the daemon — only the floor drops them.
 			expect(captured?.DATABASE_URL).toBeUndefined();
+			expect(captured?.VENDOR_API_KEY).toBeUndefined();
 			expect(captured?.SECRET_CANARY).toBeUndefined();
 		});
 	});
+});
+
+describe("Round 5 (SECURITY) — a PREFIX is not a boundary: COMPOSE_ENV_FILES cannot reopen the leak", () => {
+	test("C-1 FLIP: COMPOSE_ENV_FILES / DOCKER_CUSTOM_HEADERS are ABSENT from the compose env, and an empty --env-file is passed", async () => {
+		const names = ["COMPOSE_ENV_FILES", "DOCKER_CUSTOM_HEADERS", "COMPOSE_FILE", "DATABASE_URL"] as const;
+		const saved = Object.fromEntries(names.map((n) => [n, process.env[n]]));
+		// The exact live mutation codex used: a daemon env file whose values would interpolate.
+		process.env.COMPOSE_ENV_FILES = "/etc/os-release";
+		process.env.DOCKER_CUSTOM_HEADERS = "X-Leak: secret";
+		process.env.COMPOSE_FILE = "/tmp/attacker-compose.yml";
+		process.env.DATABASE_URL = "postgres://daemon-secret";
+		process.env.DOCKER_HOST ??= "unix:///var/run/docker.sock"; // a legit connection var that SHOULD survive
+		try {
+			const composeArgvs: string[][] = [];
+			const composeEnvs: (Record<string, string> | undefined)[] = [];
+			await runManifestGates({
+				manifest: contract([serviceGate]),
+				cwd: "/wt",
+				dockerProbe: hasDocker,
+				serviceSpawn: async (argv, _cwd, o) => { composeArgvs.push(argv); composeEnvs.push(o?.env); return { code: 0, output: "" }; },
+				exec: async () => ({ code: 0, stdout: "", stderr: "", sandboxed: true }),
+			});
+			expect(composeEnvs.length).toBeGreaterThanOrEqual(2); // up + down
+			for (const env of composeEnvs) {
+				// The config-injection vars the PREFIX admission used to let through are gone — so compose
+				// cannot be pointed at a daemon env file or an attacker compose file, and ${DATABASE_URL}
+				// has no source to interpolate from.
+				expect(env?.COMPOSE_ENV_FILES).toBeUndefined();
+				expect(env?.DOCKER_CUSTOM_HEADERS).toBeUndefined();
+				expect(env?.COMPOSE_FILE).toBeUndefined();
+				expect(env?.DATABASE_URL).toBeUndefined();
+				// The genuine connection var still crosses (an exact-name allow, not a prefix).
+				expect(env?.DOCKER_HOST).toBe("unix:///var/run/docker.sock");
+			}
+			// Belt: every compose invocation passes an explicit empty --env-file, so even a var we missed
+			// cannot make compose auto-load an ambient env file.
+			for (const argv of composeArgvs) {
+				const idx = argv.indexOf("--env-file");
+				expect(idx).toBeGreaterThan(-1);
+				expect(argv[idx + 1]).toContain("empty.env");
+			}
+		} finally {
+			for (const n of names) { if (saved[n] === undefined) delete process.env[n]; else process.env[n] = saved[n]; }
+		}
+	});
+
+	test.skipIf(!dockerUp)("C-1 LIVE: docker compose config — COMPOSE_ENV_FILES cannot interpolate a daemon secret past --env-file", async () => {
+		// The exact mutation codex used, proven end-to-end against REAL `docker compose config` (which
+		// resolves interpolation but starts nothing). A service env references ${LEAK_TOKEN_VALUE}; a
+		// daemon env file supplies it via COMPOSE_ENV_FILES.
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "c1-live-"));
+		try {
+			const composeFile = path.join(dir, "compose.yaml");
+			await fs.writeFile(composeFile, composeFileFor([{ name: "svc", image: "busybox", healthcheckCommand: "true", env: { PROBE: "${LEAK_TOKEN_VALUE}" } }]));
+			const daemonEnvFile = path.join(dir, "daemon.env");
+			await fs.writeFile(daemonEnvFile, "LEAK_TOKEN_VALUE=EXFILTRATED\n");
+			const emptyEnvFile = path.join(dir, "empty.env");
+			await fs.writeFile(emptyEnvFile, "");
+
+			const runConfig = async (argv: string[]): Promise<string> => {
+				const p = Bun.spawn(["docker", "compose", ...argv, "-f", composeFile, "config"], { cwd: dir, env: { ...process.env, COMPOSE_ENV_FILES: daemonEnvFile }, stdout: "pipe", stderr: "pipe" });
+				const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+				await p.exited;
+				return `${out}\n${err}`;
+			};
+
+			// NEGATIVE CONTROL — no --env-file: COMPOSE_ENV_FILES loads the daemon file, the secret leaks.
+			const leaked = await runConfig([]);
+			expect(leaked).toContain("EXFILTRATED"); // proves the vulnerability is real on this docker
+
+			// THE FIX — explicit empty --env-file: COMPOSE_ENV_FILES is ignored, nothing to interpolate.
+			const scrubbed = await runConfig(["--env-file", emptyEnvFile]);
+			expect(scrubbed).not.toContain("EXFILTRATED");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+		}
+	}, 30_000);
 });
 
 describe("H-2 — runnerImage becomes the ACTUAL sandbox image, or runner-unavailable", () => {

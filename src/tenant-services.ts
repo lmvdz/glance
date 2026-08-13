@@ -71,6 +71,16 @@ export type ServiceStart = { ok: true; handle: ServiceHandle } | { ok: false; re
 const DEFAULT_SERVICE_TIMEOUT_MS = 120_000;
 
 /**
+ * The EXACT docker-CLI connection vars the compose lifecycle legitimately needs (round 5, codex C-1)
+ * — enumerated, never a prefix. These select WHICH daemon/context/TLS to talk to; none load config or
+ * inject values into containers. `PATH`/`HOME` already ride via `tenantGateEnv`'s base allowlist.
+ * Deliberately excludes `DOCKER_CONFIG` (registry-auth dir) and `COMPOSE_PROJECT_NAME` — the project
+ * and compose file are passed explicitly with `-p`/`-f`, and a private-registry gate names its own
+ * `DOCKER_CONFIG` in `policy.env` if it truly needs one.
+ */
+const DOCKER_LIFECYCLE_ALLOW = ["DOCKER_HOST", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_CONTEXT"] as const;
+
+/**
  * Spawn `argv`, bounded by `timeoutMs` via {@link runBounded} (round 3 High): a single SIGTERM then
  * an unbounded await is not a bound (a child ignoring SIGTERM, or a docker grandchild holding the
  * stdio pipes open, hangs forever), so runBounded kills the process group, escalates to SIGKILL, and
@@ -149,12 +159,14 @@ export async function startGateServices(opts: {
 	const noop = async (): Promise<ServiceStopResult> => ({ ok: true });
 	if (!opts.services.length) return { ok: true, handle: { project: "", network: "", env: {}, stop: noop } };
 
-	// C-2 (round 4): the SCRUBBED environment the `docker compose` lifecycle runs under. A positive
-	// allowlist — PATH/HOME/… + DOCKER_*/COMPOSE_* (the CLI's own connectivity vars, never secrets) +
-	// the tenant's declared `policy.env` — so a service definition that tries to interpolate
-	// `${DATABASE_URL}` finds NOTHING to interpolate. The L-1 reject floor inside `tenantGateEnv` blocks
-	// a secret-shaped name even if it rode in via DOCKER_*/policy.env.
-	const composeEnv = tenantGateEnv(process.env, { allow: opts.policyEnv, allowPrefix: ["DOCKER_", "COMPOSE_"] });
+	// C-2 (round 4) + C-1 (round 5): the SCRUBBED environment the `docker compose` lifecycle runs under.
+	// A positive allowlist of EXACT names — never a DOCKER_*/COMPOSE_* PREFIX, which admitted
+	// `COMPOSE_ENV_FILES` (loads a daemon env file whose values interpolate `${...}` into tenant
+	// containers) and `DOCKER_CUSTOM_HEADERS` (codex C-1). Only the docker CLI's genuine connection vars
+	// cross, plus the tenant's declared `policy.env`; the `isForbiddenGateEnvName` floor inside
+	// `tenantGateEnv` refuses secrets AND config-injection vars regardless. Combined with the explicit
+	// empty `--env-file` below, there is nothing for compose to interpolate a daemon secret from.
+	const composeEnv = tenantGateEnv(process.env, { allow: [...DOCKER_LIFECYCLE_ALLOW, ...(opts.policyEnv ?? [])] });
 
 	const available = await (opts.dockerProbe ? opts.dockerProbe() : dockerAvailable());
 	if (!available) {
@@ -177,10 +189,16 @@ export async function startGateServices(opts: {
 	const project = `glance-gate-${path.basename(opts.cwd).replace(/[^a-z0-9]+/gi, "").toLowerCase().slice(0, 20) || "t"}-${Math.random().toString(36).slice(2, 8)}`;
 	let dir: string;
 	let file: string;
+	let emptyEnvFile: string;
 	try {
 		dir = opts.tmpDir ?? (await fsp.mkdtemp(path.join(os.tmpdir(), "glance-compose-")));
 		file = path.join(dir, "compose.yaml");
 		await fsp.writeFile(file, composeFileFor(opts.services), "utf8");
+		// C-1 (round 5): an EXPLICIT empty `--env-file` is the belt to the env-scrub suspenders — when a
+		// `--env-file` is passed, compose ignores `COMPOSE_ENV_FILES` and the ambient `.env` entirely, so
+		// no daemon-owned env file can feed `${...}` interpolation regardless of what's in the env.
+		emptyEnvFile = path.join(dir, "empty.env");
+		await fsp.writeFile(emptyEnvFile, "", "utf8");
 	} catch (e) {
 		return {
 			ok: false,
@@ -195,7 +213,7 @@ export async function startGateServices(opts: {
 	const down = async (): Promise<ServiceStopResult> => {
 		let result: ServiceStopResult;
 		try {
-			const r = await spawn(["docker", "compose", "-p", project, "-f", file, "down", "-v", "--remove-orphans"], opts.cwd, { timeoutMs, env: composeEnv });
+			const r = await spawn(["docker", "compose", "--env-file", emptyEnvFile, "-p", project, "-f", file, "down", "-v", "--remove-orphans"], opts.cwd, { timeoutMs, env: composeEnv });
 			// A non-zero `down` (or a killed-on-timeout one) means containers/volumes for `project` may
 			// still be alive — surfaced, never swallowed, so the caller blocks the green receipt (H-5).
 			result = r.code === 0 ? { ok: true } : { ok: false, detail: `compose down for project ${project} exited ${r.code}: ${r.output.slice(0, 300)}` };
@@ -207,7 +225,7 @@ export async function startGateServices(opts: {
 	};
 
 	const waitSeconds = Math.max(5, Math.round(timeoutMs / 1000));
-	const up = await spawn(["docker", "compose", "-p", project, "-f", file, "up", "-d", "--wait", "--wait-timeout", String(waitSeconds)], opts.cwd, { timeoutMs: timeoutMs + 5_000, env: composeEnv });
+	const up = await spawn(["docker", "compose", "--env-file", emptyEnvFile, "-p", project, "-f", file, "up", "-d", "--wait", "--wait-timeout", String(waitSeconds)], opts.cwd, { timeoutMs: timeoutMs + 5_000, env: composeEnv });
 	if (up.code !== 0) {
 		return {
 			ok: false,

@@ -60,21 +60,47 @@ export function isSecretShaped(key: string): boolean {
 	return SECRET_EXACT.has(key) || SECRET_NAME.test(key) || /^SECRET_/i.test(key) || /CANARY/i.test(key);
 }
 
+/**
+ * CONFIG-INJECTION hard floor (round 5, codex C-1). These are not secrets by NAME, but they
+ * reopen the secret leak one level up: they instruct docker/compose to LOAD other config — env files,
+ * alternate compose files, custom HTTP headers — whose contents then participate in `${...}`
+ * interpolation into tenant service containers. Codex proved it live: `COMPOSE_ENV_FILES=/etc/os-release`
+ * changed `${ID}` via real `docker compose config`, so a daemon-owned env file with `DATABASE_URL=…`
+ * restores `${DATABASE_URL}` interpolation despite the direct scrub. A prefix allowlist is not a
+ * boundary — this floor is refused even if a future edit re-widens the allow set. (`docker compose`
+ * ALSO gets an explicit empty `--env-file`, so this is belt-and-suspenders.)
+ */
+const CONFIG_INJECTION_DENY = new Set([
+	"COMPOSE_ENV_FILES", "COMPOSE_FILE", "COMPOSE_PATH_SEPARATOR", "COMPOSE_PROFILES",
+	"DOCKER_CUSTOM_HEADERS",
+]);
+
+/** Refused everywhere, over any allowlist: a secret name OR a config-injection var. */
+function isForbiddenGateEnvName(key: string): boolean {
+	return isSecretShaped(key) || CONFIG_INJECTION_DENY.has(key);
+}
+
+/**
+ * Round 5 (codex C-1): there is NO external prefix extension point any more. Callers name the exact
+ * vars they need. A prefix (`DOCKER_*`/`COMPOSE_*`) is not a boundary — it let `COMPOSE_ENV_FILES`
+ * and `DOCKER_CUSTOM_HEADERS` through, the same shape of mistake as round 3's suffix denylist one
+ * level up. The internal base prefixes that remain are rail/locale-owned (LC_, GLANCE_*), never
+ * attacker-influenced and never config-injecting.
+ */
 export function tenantGateEnv(
 	source: NodeJS.ProcessEnv = process.env,
-	extra?: { allow?: readonly string[]; allowPrefix?: readonly string[]; add?: Record<string, string> },
+	extra?: { allow?: readonly string[]; add?: Record<string, string> },
 ): Record<string, string> {
 	const allow = new Set<string>([
 		...TENANT_GATE_ALLOW_EXACT,
 		...(source.OMP_SQUAD_GATE_ENV ?? "").split(",").map((s) => s.trim()).filter(Boolean),
 		...(extra?.allow ?? []).map((s) => s.trim()).filter(Boolean),
 	]);
-	const prefixes = [...TENANT_GATE_ALLOW_PREFIX, ...(extra?.allowPrefix ?? [])];
 	const env: Record<string, string> = {};
 	for (const [key, value] of Object.entries(source)) {
 		if (typeof value !== "string") continue;
-		if (isSecretShaped(key)) continue; // L-1 floor — never, even if named
-		if (allow.has(key) || prefixes.some((p) => key.startsWith(p))) env[key] = value;
+		if (isForbiddenGateEnvName(key)) continue; // hard floor — secrets AND config-injection, never
+		if (allow.has(key) || TENANT_GATE_ALLOW_PREFIX.some((p) => key.startsWith(p))) env[key] = value;
 	}
 	// The service-discovery vars are added LAST and unconditionally — they are the rail's own values,
 	// not the daemon's env, so they ride even if a same-named var was (impossibly) absent above.
