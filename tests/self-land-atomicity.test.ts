@@ -15,7 +15,7 @@ import { isMeasuredLand } from "../src/rail/land-metrics.ts";
 import type { LandReceiptIndexRow } from "../src/rail/receipt/types.ts";
 import { appendLandReceiptIndexRow } from "../src/rail/receipt/write.ts";
 import { readLandReceiptIndex } from "../src/rail/land-metrics.ts";
-import { journalPending, journalFinalized, journalQueued, journalAborted, readSelfLandJournal, journalRowsForWindow, unconfirmedSelfLands, newSelfLandAttemptId } from "../src/rail/self-land/journal.ts";
+import { journalPending, journalFinalized, journalQueued, journalAborted, readSelfLandJournal, journalRowsForWindow, unconfirmedSelfLands, reconcileUnconfirmedSelfLands, newSelfLandAttemptId, type QueuedPrReader } from "../src/rail/self-land/journal.ts";
 import type { LandReceipt } from "../src/rail/receipt/types.ts";
 
 const tmps: string[] = [];
@@ -86,6 +86,89 @@ test("C-3: isMeasuredLand requires verdict pass — an abstain with precision.n>
 	expect(isMeasuredLand({ ...base, verdict: "veto" })).toBe(false);
 	// A missing verdict fails closed.
 	expect(isMeasuredLand({ ...base, verdict: undefined })).toBe(false);
+});
+
+// ── glance#392 item 5: reconcile a QUEUED self-land against GitHub, fold the merged ones as measured ──
+
+const GATED = "a".repeat(40);
+const MOVED = "b".repeat(40);
+const MERGE_COMMIT = "c".repeat(40);
+
+/** The measured row a queued self-land carries (verdict pass + precision, landed true, no commit yet). */
+function queuedRow(): LandReceiptIndexRow {
+	return { at: 1, repo: "lmvdz/glance", branch: "deepen/x", landed: true, forced: false, gateStatus: "green", verdict: "pass", precision: { lineage: "codex", n: 5, survived: 4 }, criteriaSource: "pr-body" };
+}
+async function queue(dir: string): Promise<string> {
+	const id = newSelfLandAttemptId("lmvdz/glance", "deepen/x", GATED, "main");
+	await journalQueued(dir, id, { repo: "lmvdz/glance", branch: "deepen/x", headOid: GATED, base: "main", prNumber: 370, detail: "enqueued", criteriaSource: "pr-body", criteriaCount: 1, row: queuedRow() });
+	return id;
+}
+
+test("reconcile FOLDS a queued land merged at the gated head — it becomes a measured window row and leaves the unconfirmed floor", async () => {
+	const dir = await tmpDir("reconcile-fold-");
+	await queue(dir);
+	expect((await unconfirmedSelfLands(dir)).length).toBe(1); // queued, awaiting confirmation
+
+	const reader: QueuedPrReader = async () => ({ state: "MERGED", headOid: GATED, mergeCommit: MERGE_COMMIT });
+	const out = await reconcileUnconfirmedSelfLands(dir, reader);
+	expect(out).toHaveLength(1);
+	expect(out[0].action).toBe("folded");
+	expect(out[0].commit).toBe(MERGE_COMMIT);
+
+	// It is now a finalized row the window folds (with the real merge commit stamped), and no longer
+	// counts against the unconfirmed floor.
+	const folded = await journalRowsForWindow(dir, []);
+	expect(folded).toHaveLength(1);
+	expect(folded[0].commit).toBe(MERGE_COMMIT);
+	expect(isMeasuredLand(folded[0])).toBe(true);
+	expect((await unconfirmedSelfLands(dir)).length).toBe(0);
+});
+
+test("reconcile is IDEMPOTENT — a second run sees it finalized and does nothing new", async () => {
+	const dir = await tmpDir("reconcile-idem-");
+	await queue(dir);
+	const reader: QueuedPrReader = async () => ({ state: "MERGED", headOid: GATED, mergeCommit: MERGE_COMMIT });
+	await reconcileUnconfirmedSelfLands(dir, reader);
+	const second = await reconcileUnconfirmedSelfLands(dir, reader);
+	expect(second).toHaveLength(0); // nothing unconfirmed left to reconcile
+});
+
+test("reconcile leaves a still-OPEN queued land PENDING (never folds, never aborts)", async () => {
+	const dir = await tmpDir("reconcile-open-");
+	await queue(dir);
+	const reader: QueuedPrReader = async () => ({ state: "OPEN", headOid: GATED });
+	const out = await reconcileUnconfirmedSelfLands(dir, reader);
+	expect(out[0].action).toBe("pending");
+	expect((await unconfirmedSelfLands(dir)).length).toBe(1); // still awaiting
+	expect(await journalRowsForWindow(dir, [])).toHaveLength(0); // never folded
+});
+
+test("reconcile ABORTS a queued land merged at a NON-gated head (a merge-queue rewrote the tree) — not folded as measured", async () => {
+	const dir = await tmpDir("reconcile-moved-");
+	await queue(dir);
+	const reader: QueuedPrReader = async () => ({ state: "MERGED", headOid: MOVED, mergeCommit: MERGE_COMMIT });
+	const out = await reconcileUnconfirmedSelfLands(dir, reader);
+	expect(out[0].action).toBe("aborted");
+	expect(await journalRowsForWindow(dir, [])).toHaveLength(0); // the measured attempt is void
+	expect((await unconfirmedSelfLands(dir)).length).toBe(0); // no longer pending — terminally aborted
+});
+
+test("reconcile ABORTS a queued land whose PR CLOSED unmerged", async () => {
+	const dir = await tmpDir("reconcile-closed-");
+	await queue(dir);
+	const reader: QueuedPrReader = async () => ({ state: "CLOSED", headOid: GATED });
+	const out = await reconcileUnconfirmedSelfLands(dir, reader);
+	expect(out[0].action).toBe("aborted");
+	expect((await unconfirmedSelfLands(dir)).length).toBe(0);
+});
+
+test("reconcile leaves an entry PENDING on a read FAULT — never aborts a possibly-merged land (undercount guard)", async () => {
+	const dir = await tmpDir("reconcile-fault-");
+	await queue(dir);
+	const reader: QueuedPrReader = async () => undefined; // transient gh/network fault
+	const out = await reconcileUnconfirmedSelfLands(dir, reader);
+	expect(out[0].action).toBe("unreadable");
+	expect((await unconfirmedSelfLands(dir)).length).toBe(1); // still pending, not dropped
 });
 
 // ── H-3: durable journal — a merged measured land is never lost to a receipt-write fault ────────

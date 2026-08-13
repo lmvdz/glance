@@ -1161,7 +1161,15 @@ async function landAgentPrOnce(opts: LandOpts & { defaultBranch: string }, state
 		// auto-retry loop the retryable flag drives).
 		const stRaw = await ghJson<unknown>(["pr", "view", String(ensure.prNumber), "--repo", repoSlug, "--json", "state,mergeStateStatus"], repo);
 		if (stRaw === undefined || typeof stRaw !== "object" || stRaw === null || Array.isArray(stRaw) || typeof (stRaw as { state?: unknown }).state !== "string") {
-			return { ok: false, committed, merged: false, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, detail: `self-land: could not confirm PR #${ensure.prNumber}'s state after gh pr merge — refusing to claim a merge that isn't verified` };
+			// UNDERCOUNT-DIRECTION FIX (glance#392 item 4): `gh pr merge --match-head-commit` ALREADY exited
+			// 0 — the merge may well have happened; only the FOLLOW-UP confirm read faulted (a transient
+			// gh/network hiccup). Journaling this `aborted` (the old behaviour: a plain `ok:false` with no
+			// `enqueued`) would DROP a possibly-merged land from the window — the exact silent under-count
+			// the journal exists to prevent. Mark it `enqueued` so `selfLand` journals it QUEUED
+			// (unconfirmed) and the drain's reconcile re-reads GitHub to settle it, never `aborted`. A
+			// genuinely un-merged PR gets discovered as CLOSED/OPEN at reconcile and aborted THEN, once
+			// it's actually known — not guessed here from an unreadable confirm.
+			return { ok: false, committed, merged: false, enqueued: true, message, mode: "pr", pushed: true, prUrl: ensure.prUrl, prNumber: ensure.prNumber, prState: "open", detail: `self-land: gh pr merge exited 0 for PR #${ensure.prNumber} but its post-merge state could not be READ (transient gh/network fault) — recording as UNCONFIRMED (queued) for reconcile rather than aborting a possibly-merged land` };
 		}
 		const st = stRaw as { state: string; mergeStateStatus?: unknown };
 		if (st.state !== "MERGED") {

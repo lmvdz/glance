@@ -204,7 +204,7 @@ import { addPlanRevisionCandidate, appendCommentEvent, type ArtifactComment, typ
 import { castPlanVote as appendPlanVoteCast, closePlanVoteRound as appendPlanVoteClose, currentPlanVoteRound as readCurrentPlanVoteRound, listPlanVoteRounds as readPlanVoteRounds, type OpenPlanVoteInput, openPlanVoteRound, recordPlanVoteCommit, tallyPlanVoteRound } from "./plan-votes.ts";
 import { isPlanDocPath, planDocHeadRevision, resolveSafeDocPath } from "./plan-doc.ts";
 import type { VoteQuorum } from "./plan-vote-quorum.ts";
-import { acceptanceCriteriaFromPrBody, appendLandReceiptIndexRow, criteriaFromTexts, isMeasuredLand, journalAborted, journalFinalized, journalPending, journalQueued, landFailureCount, landReceiptIndexRow, newSelfLandAttemptId, readForcedLands, readLandLedger, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride, classifyLand, writeLandReceipt, postReceiptComment, type LandReceipt, type LandReceiptPrecision } from "./rail/index.ts";
+import { acceptanceCriteriaFromPrBody, appendLandReceiptIndexRow, criteriaFromTexts, isMeasuredLand, journalAborted, journalFinalized, journalPending, journalQueued, journalRowsForWindow, landFailureCount, landReceiptDir, landReceiptIndexRow, newSelfLandAttemptId, readForcedLands, readLandLedger, readLandReceiptIndex, readValidatorOverrides, recordForcedLand, recordLandOutcome, recordValidatorOverride, classifyLand, writeLandReceipt, postReceiptComment, receiptCommentOptions, type LandReceipt, type LandReceiptIndexRow, type LandReceiptPrecision } from "./rail/index.ts";
 import { isLandingUnit, landingRosterOf } from "./is-landing-unit.ts";
 import { readTaskOutcomes, recordTaskOutcome, type TaskOutcomeRow } from "./task-outcomes.ts";
 import { buildTaskClassMatrix } from "./omp-graph/task-class-matrix.ts";
@@ -4872,7 +4872,7 @@ export class SquadManager extends EventEmitter {
 			this.log("info", `land receipt written for ${ctx.label}: ${htmlPath}`);
 			if (result.prNumber) {
 				const slug = repoIdentity(ctx.repo).split("/").slice(-2).join("/");
-				const posted = await postReceiptComment(ctx.repo, slug, result.prNumber, receipt, { receiptHref: htmlPath, hrefKind: "path" });
+				const posted = await postReceiptComment(ctx.repo, slug, result.prNumber, receipt, receiptCommentOptions(htmlPath));
 				if (!posted) this.log("warn", `land receipt PR comment failed for ${ctx.label} (#${result.prNumber}) — non-fatal`);
 			}
 			return { receipt, htmlPath };
@@ -4891,7 +4891,7 @@ export class SquadManager extends EventEmitter {
 	 * (honest absence), never throw.
 	 */
 	private async buildLandReceipt(
-		ctx: { repo: string; branch: string; costUsdFallback?: number; criteriaSource?: "pr-body" | "call" },
+		ctx: { repo: string; branch: string; costUsdFallback?: number; criteriaSource?: "pr-body" | "call"; headCommit?: string },
 		result: LandResult,
 		effectiveModel: string | undefined,
 		lastReceipt: RunReceipt | undefined,
@@ -4927,6 +4927,10 @@ export class SquadManager extends EventEmitter {
 			repo: slug,
 			branch,
 			commit,
+			// The pre-merge head the gate graded (glance#392 G8) — carried so the wedge can green a
+			// PRE-merge required check against the exact tip this receipt proves. Only on a real merge
+			// where the caller (selfLand) knew the gated head; absent on an agent land (old semantics).
+			...(merged && ctx.headCommit ? { headCommit: ctx.headCommit } : {}),
 			message: commitMessage,
 			files,
 			insertions,
@@ -5231,7 +5235,27 @@ export class SquadManager extends EventEmitter {
 				// distinct, non-defect outcome. Every OTHER non-merge (guard refused, conflict, gate) aborts
 				// the journal so a pending never lingers as a false "this landed".
 				if (result.enqueued) {
-					await journalQueued(this.stateDir, journalId, { repo: slug, branch, headOid: journalHead, base: expectBase, prNumber: pr?.number ?? result.prNumber ?? 0, detail: result.detail ?? result.message }).catch((e) => this.log("warn", `self-land journal queued-write failed (non-fatal): ${errText(e)}`));
+					// Carry the MEASURED ROW the land already earned (glance#392 item 5) so the drain's
+					// reconcile can fold it as MEASURED — not merely as a bare land — once GitHub confirms the
+					// merge at the gated head. gateStatus is `green` by CONSTRUCTION: a self-land reaches
+					// `gh pr merge` only after the scratch acceptance+regression gate passed AND
+					// `requireValidationPass` (so `classifyLand(result)`, which would read the enqueue as
+					// "failed" off `result.ok`, is deliberately NOT used here). No `commit`/`landId` yet — the
+					// merge commit isn't known until the queue completes; reconcile stamps it.
+					const queuedRow = landReceiptIndexRow({
+						repo: slug,
+						branch,
+						landed: true,
+						at: Date.now(),
+						gate: { status: "green", unprovenGreenRejected: false, newRegressions: [], baseWasRed: false },
+						validation,
+						forcedWithoutProof: false,
+						files: [],
+						cost: { costUnknown: true },
+						...(criteriaSource ? { criteriaSource } : {}),
+						...(expectHeadOid ? { headCommit: expectHeadOid } : {}),
+					});
+					await journalQueued(this.stateDir, journalId, { repo: slug, branch, headOid: journalHead, base: expectBase, prNumber: pr?.number ?? result.prNumber ?? 0, detail: result.detail ?? result.message, criteriaSource, criteriaCount: criteria.length, row: queuedRow }).catch((e) => this.log("warn", `self-land journal queued-write failed (non-fatal): ${errText(e)}`));
 					return { ok: false, measured: false, refusal: "queued", message: result.message, detail: result.detail ?? result.message, ...base, criteriaSource, criteriaCount: criteria.length, gateCommand: command, targetBranch: target, verdict: validation?.verdict, land: result };
 				}
 				await journalAborted(this.stateDir, journalId, { repo: slug, branch, headOid: journalHead, base: expectBase, detail: result.detail ?? result.message }).catch((e) => this.log("warn", `self-land journal abort failed (non-fatal): ${errText(e)}`));
@@ -5259,7 +5283,7 @@ export class SquadManager extends EventEmitter {
 			// the merge is confirmed — carrying the full row, BEFORE the best-effort index/HTML I/O. So a
 			// crash between the merge and the index append still leaves a finalized entry the window folds;
 			// the old order (index-then-finalize) could crash pending-only and vanish the land.
-			const receipt = await this.buildLandReceipt({ repo, branch, criteriaSource }, result, undefined, undefined, validation);
+			const receipt = await this.buildLandReceipt({ repo, branch, criteriaSource, headCommit: expectHeadOid }, result, undefined, undefined, validation);
 			if (!receipt) {
 				this.log("error", `self-land of ${branch} MERGED but could not build a receipt (no branch?) — impossible here`);
 				return { ok: true, measured, message: `self-land merged ${branch} into ${target}`, ...base, criteriaSource, criteriaCount: criteria.length, gateCommand: command, targetBranch: target, verdict: validation?.verdict, receiptWritten: false, land: result };
@@ -5287,7 +5311,7 @@ export class SquadManager extends EventEmitter {
 			let receiptPath: string | undefined;
 			try {
 				receiptPath = await writeLandReceipt(this.stateDir, receipt, { skipIndex: true });
-				if (result.prNumber) await postReceiptComment(repo, slug, result.prNumber, receipt, { receiptHref: receiptPath, hrefKind: "path" }).catch(() => {});
+				if (result.prNumber) await postReceiptComment(repo, slug, result.prNumber, receipt, receiptCommentOptions(receiptPath)).catch(() => {});
 			} catch (err) {
 				this.log("warn", `self-land HTML receipt failed for ${branch} (non-fatal, index row already durable): ${errText(err)}`);
 			}
@@ -12503,6 +12527,37 @@ export class SquadManager extends EventEmitter {
 		}
 		this.pushTapLog.append({ ts: Date.now(), agentId: agentId.slice(0, 200) });
 		return { ok: true };
+	}
+
+	/**
+	 * The land-receipt index rows this manager durably wrote (glance#392 G6) — the countable substrate
+	 * behind `GET /api/land-receipts`, so the dogfood evidence a PR comment references is reachable from
+	 * a browser, not just a file on the daemon host. Folds in crash-safe FINALIZED journal rows the same
+	 * way the drain does, so a receipt whose index-append faulted is still listed. Read-only; a read
+	 * fault degrades to an empty list rather than throwing into the HTTP handler (the count endpoint —
+	 * `append-selfland-drain` — is where an unreadable index must fail closed, not this browse surface).
+	 */
+	async landReceiptIndexRows(): Promise<LandReceiptIndexRow[]> {
+		const read = await readLandReceiptIndex(this.stateDir).catch(() => ({ rows: [] as LandReceiptIndexRow[], malformed: 0 }));
+		const folded = await journalRowsForWindow(this.stateDir, read.rows).catch(() => [] as LandReceiptIndexRow[]);
+		return [...read.rows, ...folded];
+	}
+
+	/**
+	 * Serve one land-receipt HTML file by NAME (glance#392 G6) — the content `GET /api/land-receipts/:name`
+	 * returns. The name is validated to a BARE receipt filename (`writeLandReceipt`'s own charset:
+	 * `[a-zA-Z0-9._-]` + `.html`) with no path separators, and the resolved path is asserted to still sit
+	 * directly under this manager's `land-receipts/` dir — a defence-in-depth reject of any traversal
+	 * (`..`, absolute, symlinked-out) before a single byte is read. Returns the HTML, or `undefined` when
+	 * the name is invalid or the file is absent/unreadable (the route maps `undefined` to 404).
+	 */
+	async readLandReceiptHtml(name: string): Promise<string | undefined> {
+		if (!/^[a-zA-Z0-9._-]+\.html$/.test(name) || name.includes("..")) return undefined;
+		const dir = landReceiptDir(this.stateDir);
+		const file = path.join(dir, name);
+		const rel = path.relative(dir, file);
+		if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return undefined;
+		return fs.readFile(file, "utf8").catch(() => undefined);
 	}
 
 	/** Adoption counters (plans/daily-dogfood-engine/02) from this manager's own durable stateDir

@@ -12,8 +12,13 @@ export {
 	readSelfLandJournal,
 	journalRowsForWindow,
 	unconfirmedSelfLands,
+	reconcileUnconfirmedSelfLands,
 	selfLandJournalPath,
 	newSelfLandAttemptId,
 	type SelfLandJournalEntry,
 	type SelfLandJournalStatus,
+	type QueuedPrState,
+	type QueuedPrReader,
+	type ReconcileAction,
+	type ReconcileOutcome,
 } from "./journal.ts";

@@ -90,8 +90,17 @@ export function journalFinalized(stateDir: string, id: string, input: { repo: st
 	return appendJournal(stateDir, { id, repo: input.repo, branch: input.branch, headOid: input.headOid, base: input.base, status: "finalized", at: Date.now(), landedCommit: input.landedCommit, row: input.row });
 }
 
-export function journalQueued(stateDir: string, id: string, input: { repo: string; branch: string; headOid: string; base: string; prNumber: number; detail: string }): Promise<void> {
-	return appendJournal(stateDir, { id, repo: input.repo, branch: input.branch, headOid: input.headOid, base: input.base, status: "queued", at: Date.now(), prNumber: input.prNumber, detail: input.detail });
+/**
+ * Record a `gh pr merge` that ENQUEUED (or an unreadable post-merge confirm after a 0-exit merge —
+ * glance#392 item 4). Carries the MEASURED-ROW payload (`row`) the land already earned — verdict +
+ * precision + gateStatus, `landed:true`, but no `commit`/`landId` yet (the merge commit isn't known
+ * until the queue completes). The reconcile step (`reconcileUnconfirmedSelfLands`) fills in the commit
+ * and promotes it to `finalized` once GitHub confirms the merge at the gated head. Without the carried
+ * row, a queued land could only ever be folded as an UNMEASURED land after it merged — losing the very
+ * reviewer-precision measurement the window exists to count (glance#392 item 5).
+ */
+export function journalQueued(stateDir: string, id: string, input: { repo: string; branch: string; headOid: string; base: string; prNumber: number; detail: string; criteriaSource?: "pr-body" | "call"; criteriaCount?: number; row?: LandReceiptIndexRow }): Promise<void> {
+	return appendJournal(stateDir, { id, repo: input.repo, branch: input.branch, headOid: input.headOid, base: input.base, status: "queued", at: Date.now(), prNumber: input.prNumber, criteriaSource: input.criteriaSource, criteriaCount: input.criteriaCount, row: input.row, detail: input.detail });
 }
 
 export function journalAborted(stateDir: string, id: string, input: { repo: string; branch: string; headOid: string; base: string; detail: string }): Promise<void> {
@@ -157,4 +166,102 @@ export async function journalRowsForWindow(stateDir: string, indexRows: readonly
 export async function unconfirmedSelfLands(stateDir: string): Promise<SelfLandJournalEntry[]> {
 	const latest = await readSelfLandJournal(stateDir);
 	return [...latest.values()].filter((e) => e.status === "pending" || e.status === "queued");
+}
+
+/** SHA identity tolerant of an abbreviated-vs-full form on either side (gh returns either) — the same
+ *  rule the self-land head guard uses. Empty on either side is never a match. */
+function sameOid(a: string | undefined, b: string | undefined): boolean {
+	if (!a || !b) return false;
+	const x = a.toLowerCase();
+	const y = b.toLowerCase();
+	return x === y || x.startsWith(y) || y.startsWith(x);
+}
+
+/** The live PR facts the reconcile step reads from GitHub for one unconfirmed self-land. Injected so
+ *  the drain wires `gh pr view` while tests pass a pure function — this module stays gh-free. */
+export interface QueuedPrState {
+	/** GitHub PR state: `MERGED` / `CLOSED` / `OPEN` (any other value is treated as still-open). */
+	state: string;
+	/** The PR head OID at read time. For a MERGED PR this is the commit that actually merged — compared
+	 *  against the gated `headOid` so a merge-queue that REWROTE the tree we measured is never folded as
+	 *  our measured land. */
+	headOid?: string;
+	/** The merge commit OID, when the PR merged — becomes the folded row's `commit`. */
+	mergeCommit?: string;
+}
+
+/** Reads GitHub for one unconfirmed entry; returns undefined on a transient fault (which must leave the
+ *  entry pending, never abort it). */
+export type QueuedPrReader = (entry: SelfLandJournalEntry) => Promise<QueuedPrState | undefined>;
+
+export type ReconcileAction = "folded" | "aborted" | "pending" | "unreadable";
+export interface ReconcileOutcome {
+	id: string;
+	branch: string;
+	prNumber?: number;
+	action: ReconcileAction;
+	detail: string;
+	/** The merge commit, on a `folded` outcome. */
+	commit?: string;
+}
+
+/**
+ * Settle every UNCONFIRMED self-land (`queued`/`pending`) against GitHub (glance#392 item 5) — the
+ * read-side that completes B2's persist-as-`queued` / never-count. For each entry the injected reader
+ * re-reads the PR, and this decides its fate:
+ *   - MERGED at the GATED head (headOid matches) AND the entry carries its measured `row` ⇒ FOLD:
+ *     append a `finalized` entry (the row + the real merge commit) so the window counts the measured
+ *     land it would otherwise have lost. Idempotent — a re-run sees `finalized` (no longer unconfirmed)
+ *     and skips it; `journalRowsForWindow` then folds it, deduped by (branch, commit).
+ *   - MERGED but the head MOVED (a merge-queue rewrote the tree we measured), or CLOSED unmerged ⇒
+ *     ABORT: the gated tree is not what landed / will never land, so this measured attempt is void. A
+ *     rewritten descendant needs its OWN self-land + fresh measurement, never a silent count here.
+ *   - still OPEN / still queued ⇒ leave PENDING (unchanged) — reconciled again on the next drain.
+ *   - reader fault (transient gh/network), or a crash-orphaned `pending` with no measured row we could
+ *     reconstruct ⇒ leave PENDING; NEVER aborted on a fault (that would drop a possibly-merged land —
+ *     the undercount direction this whole path guards).
+ * A journal WRITE fault while folding/aborting is reported (as `unreadable`/pending for a fold) but
+ * never throws — the drain must still produce its ledger row.
+ */
+export async function reconcileUnconfirmedSelfLands(stateDir: string, read: QueuedPrReader): Promise<ReconcileOutcome[]> {
+	const pending = await unconfirmedSelfLands(stateDir);
+	const out: ReconcileOutcome[] = [];
+	for (const e of pending) {
+		const tag = `${e.branch}${e.prNumber ? ` (#${e.prNumber})` : ""}`;
+		let state: QueuedPrState | undefined;
+		try {
+			state = await read(e);
+		} catch {
+			state = undefined;
+		}
+		if (!state || typeof state.state !== "string") {
+			out.push({ id: e.id, branch: e.branch, prNumber: e.prNumber, action: "unreadable", detail: `could not re-read PR state for ${tag} — left pending (never aborted on a read fault)` });
+			continue;
+		}
+		const st = state.state.toUpperCase();
+		const headMatches = sameOid(state.headOid, e.headOid);
+		if (st === "MERGED" && headMatches && state.mergeCommit && e.row) {
+			const commit = state.mergeCommit;
+			const row: LandReceiptIndexRow = { ...e.row, commit, landId: `${e.branch}\0${commit}` };
+			try {
+				await journalFinalized(stateDir, e.id, { repo: e.repo, branch: e.branch, headOid: e.headOid, base: e.base, landedCommit: commit, row });
+				out.push({ id: e.id, branch: e.branch, prNumber: e.prNumber, action: "folded", commit, detail: `${tag} merged at the gated head ${e.headOid.slice(0, 12)} → folded as measured (merge commit ${commit.slice(0, 12)})` });
+			} catch (err) {
+				out.push({ id: e.id, branch: e.branch, prNumber: e.prNumber, action: "unreadable", detail: `${tag} merged at the gated head but the finalize-journal write FAILED (${String(err)}) — left pending, retry the drain` });
+			}
+			continue;
+		}
+		if (st === "MERGED" && !headMatches) {
+			await journalAborted(stateDir, e.id, { repo: e.repo, branch: e.branch, headOid: e.headOid, base: e.base, detail: `${tag} merged, but at head ${state.headOid?.slice(0, 12) ?? "unknown"} — NOT the gated ${e.headOid.slice(0, 12)} (a merge-queue rewrote the tree). The measured attempt is void; the rewritten head needs its own self-land.` }).catch(() => {});
+			out.push({ id: e.id, branch: e.branch, prNumber: e.prNumber, action: "aborted", detail: `${tag} merged at a non-gated head — measured attempt void` });
+			continue;
+		}
+		if (st === "CLOSED") {
+			await journalAborted(stateDir, e.id, { repo: e.repo, branch: e.branch, headOid: e.headOid, base: e.base, detail: `${tag} closed without merging — the queued land will never complete.` }).catch(() => {});
+			out.push({ id: e.id, branch: e.branch, prNumber: e.prNumber, action: "aborted", detail: `${tag} closed unmerged` });
+			continue;
+		}
+		out.push({ id: e.id, branch: e.branch, prNumber: e.prNumber, action: "pending", detail: `${tag} state=${state.state} — awaiting confirmation` });
+	}
+	return out;
 }

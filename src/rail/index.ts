@@ -31,6 +31,7 @@ export {
 	writeLandReceipt,
 	appendLandReceiptIndexRow,
 	postReceiptComment,
+	receiptCommentOptions,
 	landReceiptDir,
 	landReceiptFilename,
 	landReceiptIndexRow,
@@ -51,10 +52,15 @@ export {
 	readSelfLandJournal,
 	journalRowsForWindow,
 	unconfirmedSelfLands,
+	reconcileUnconfirmedSelfLands,
 	selfLandJournalPath,
 	newSelfLandAttemptId,
 	type SelfLandJournalEntry,
 	type SelfLandJournalStatus,
+	type QueuedPrState,
+	type QueuedPrReader,
+	type ReconcileAction,
+	type ReconcileOutcome,
 } from "./self-land/index.ts";
 
 // Dogfood-window instrumentation (landing-rail #339): the READ + COUNT side of the land-receipt

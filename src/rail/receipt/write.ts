@@ -221,6 +221,29 @@ export async function writeLandReceipt(stateDir: string, receipt: LandReceipt, o
 }
 
 /**
+ * Resolve how a PR comment should link to the full HTML receipt (glance#392 G6 — "receipts reachable
+ * from the PR"). Two honest postures, chosen by whether the daemon has a reachable base URL:
+ *
+ *  - `GLANCE_RECEIPT_BASE_URL` is set (the daemon is reachable — a tunnel, a deployed webapp): the
+ *    comment links to the SERVED route `<base>/api/land-receipts/<file>` as a real, clickable URL a
+ *    browser can open. `src/server.ts` serves that route from `<stateDir>/land-receipts/`.
+ *  - it is NOT set (a laptop daemon with no public URL — the common case): the href is OMITTED
+ *    entirely. The old `hrefKind:"path"` rendered an escaped LOCAL filesystem path that is useless to
+ *    anyone off the daemon host (the exact R1 G6 defect); the comment's own summary table is already
+ *    the readable receipt, so dropping the dead link is strictly better than showing it.
+ *
+ * Never emits a broken local-path link. `htmlPath` is the absolute path `writeLandReceipt` returned;
+ * only its basename is used to form the served URL (the file lives under the receipts dir the route
+ * scopes to).
+ */
+export function receiptCommentOptions(htmlPath: string): CommentOptions {
+	const base = process.env.GLANCE_RECEIPT_BASE_URL?.trim();
+	if (!base) return {};
+	const url = `${base.replace(/\/+$/, "")}/api/land-receipts/${encodeURIComponent(path.basename(htmlPath))}`;
+	return { receiptHref: url, hrefKind: "url" };
+}
+
+/**
  * Post the compact receipt comment to a PR via `gh pr comment`. `repoSlug` must be "owner/repo".
  * Returns true on success. Never throws — a comment failure must never fail a land; `gh`'s own wrapper
  * already degrades a missing binary to a non-zero code rather than throwing.

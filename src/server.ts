@@ -1184,6 +1184,28 @@ export class SquadServer {
 			const windowMs = Number(url.searchParams.get("windowMs"));
 			return Response.json(learningLoopPayloadAcross(managers, Number.isFinite(windowMs) && windowMs > 0 ? windowMs : undefined));
 		}
+		if (url.pathname === "/api/land-receipts") {
+			// Dogfood receipt surface (glance#392 G6): the land-receipt index across this session's
+			// managers, newest-first — so the evidence a PR comment references is reachable from a browser,
+			// not only as a file on the daemon host. Viewer-tier read (like /api/adoption): a receipt is
+			// the honest self-contained record the whole window is about, not sensitive data.
+			const rows = (await Promise.all(managers.map((m) => m.landReceiptIndexRows()))).flat();
+			rows.sort((a, b) => b.at - a.at);
+			return Response.json({ receipts: rows });
+		}
+		const receiptFileMatch = url.pathname.match(/^\/api\/land-receipts\/([^/]+)$/);
+		if (receiptFileMatch) {
+			// Serve one self-contained HTML receipt by name (glance#392 G6) — the target the PR-comment
+			// URL points at when GLANCE_RECEIPT_BASE_URL is set. Each manager validates the name and scopes
+			// it strictly under its own land-receipts/ dir (no traversal); the first manager that has it
+			// wins. Absent ⇒ 404, never a directory listing or a path echo.
+			const name = decodeURIComponent(receiptFileMatch[1]);
+			for (const m of managers) {
+				const html = await m.readLandReceiptHtml(name);
+				if (html !== undefined) return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+			}
+			return new Response("receipt not found", { status: 404 });
+		}
 		if (url.pathname === "/api/adoption") {
 			// Dogfood adoption counters (plans/daily-dogfood-engine/02): casual sessions/prompts/push-taps
 			// per UTC day, computed per manager from its OWN durable stateDir data (receipts/,

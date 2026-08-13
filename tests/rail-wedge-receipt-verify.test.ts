@@ -70,6 +70,42 @@ test("SHA match is case-insensitive (git SHAs are canonically lowercase, but nev
 	expect(v).toEqual({ ok: true });
 });
 
+// ── 2b. pre-merge head match (glance#392 G8) — the wedge greens the gated PRE-merge head ──────────
+
+const MERGE_COMMIT = "1".repeat(40); // the post-merge merge commit a rail receipt's `commit` carries
+
+test("a rail receipt greens a PRE-merge PR: headCommit === PR head verifies even though commit is the merge commit", () => {
+	// The exact G8 scenario: receipt.commit is the MERGE commit (≠ PR head), but headCommit is the
+	// gated pre-merge head, which equals the PR's current head. It must verify.
+	const v = verifyReceiptForPr(receipt({ commit: MERGE_COMMIT, headCommit: HEAD_SHA }), "acme", "widgets", HEAD_SHA, { now: NOW });
+	expect(v).toEqual({ ok: true });
+});
+
+test("FLIP-TEST: a receipt whose headCommit is the WRONG commit still FAILS — never over-loosened", () => {
+	const v = verifyReceiptForPr(receipt({ commit: MERGE_COMMIT, headCommit: "9".repeat(40) }), "acme", "widgets", HEAD_SHA, { now: NOW });
+	expect(v.ok).toBe(false);
+	if (v.ok) throw new Error("unreachable");
+	expect(v.reason).toBe("sha-mismatch");
+});
+
+test("headCommit takes precedence over commit: commit matches the head but headCommit doesn't ⇒ still fails (we match the gated head, not the merge commit)", () => {
+	const v = verifyReceiptForPr(receipt({ commit: HEAD_SHA, headCommit: "9".repeat(40) }), "acme", "widgets", HEAD_SHA, { now: NOW });
+	expect(v.ok).toBe(false);
+	if (v.ok) throw new Error("unreachable");
+	expect(v.reason).toBe("sha-mismatch");
+});
+
+test("no headCommit ⇒ falls back to commit (agent/post-merge receipt semantics unchanged)", () => {
+	// A receipt with no headCommit keeps matching on `commit` exactly as before.
+	const v = verifyReceiptForPr(receipt({ commit: HEAD_SHA }), "acme", "widgets", HEAD_SHA, { now: NOW });
+	expect(v).toEqual({ ok: true });
+});
+
+test("headCommit match is case-insensitive", () => {
+	const v = verifyReceiptForPr(receipt({ commit: MERGE_COMMIT, headCommit: HEAD_SHA.toUpperCase() }), "acme", "widgets", HEAD_SHA, { now: NOW });
+	expect(v).toEqual({ ok: true });
+});
+
 // ── 3. gate outcome — a failed-land receipt must NOT verify ──────────────────────────────────────
 
 test("a failed-land receipt is NOT success — gate-not-proven", () => {
