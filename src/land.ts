@@ -246,6 +246,16 @@ async function restoreOrHalt(repo: string, target: string): Promise<boolean> {
 	return false;
 }
 
+/**
+ * The one rollback path every land seam uses (H-1, round 4): route the reset through the CHECKED
+ * {@link restoreOrHalt} and return the honest detail suffix — never a bare `git reset --hard
+ * .catch(()=>{})` that claims "rolled back" it never confirmed. On a failed restore the repo is
+ * already marked catastrophic (the next land halts); the suffix makes THIS result truthful.
+ */
+async function rollbackSuffix(repo: string, target: string): Promise<string> {
+	return (await restoreOrHalt(repo, target)) ? " — main rolled back" : " — WARNING: rollback FAILED, main may be in an unknown state; further lands halted until a human clears it";
+}
+
 /** Reset the catastrophic-halt marker for a repo (C-5): an operator's "I verified main, resume lands"
  *  clear, and the tests' teardown.
  *  @substrate the operator/recovery + test seam for the C-5 halt; the halt itself is set in-file. */
@@ -333,10 +343,7 @@ export async function runManifestLandGate(a: {
 	// C-5 (round 3): the rollback is CHECKED. If `restoreOrHalt` cannot put main back at `rollbackTo`,
 	// the repo is marked catastrophic and every later land halts — reporting "main rolled back" on an
 	// unverified reset is exactly the fail-open C-5 names. Returns the tail suffix for the detail.
-	const rollback = async (): Promise<string> => {
-		if (!a.rollbackTo) return "";
-		return (await restoreOrHalt(a.repo, a.rollbackTo)) ? " — main rolled back" : " — WARNING: rollback FAILED, main may be in an unknown state; further lands halted";
-	};
+	const rollback = async (): Promise<string> => (a.rollbackTo ? rollbackSuffix(a.repo, a.rollbackTo) : "");
 	let outcome: Awaited<ReturnType<typeof runManifestGates>>;
 	try {
 		outcome = await (a.runner ?? runManifestGates)({ manifest: a.manifest, cwd: a.repo });
@@ -564,19 +571,23 @@ export async function applyRegressionGate(p: {
 	// unchanged.
 	const mergedUnrunnable = gateRunUnrunnable(mergedRun, fullSuite);
 	if (mergedUnrunnable) {
-		await git(["reset", "--hard", p.head0], p.repo).catch(() => {});
+		const restored = await rollbackSuffix(p.repo, p.head0);
 		return {
 			ok: false,
 			committed: p.committed,
 			merged: false,
 			retryable: true,
 			message: p.message,
-			detail: `regression gate could not run (${mergedUnrunnable}): ${fullSuite}\n${(await reduceOutput(mergedRun.output, 300, { command: fullSuite, agentId: p.agentId, source: "land-detail" })).text}`,
+			detail: `regression gate could not run (${mergedUnrunnable}): ${fullSuite}${restored}\n${(await reduceOutput(mergedRun.output, 300, { command: fullSuite, agentId: p.agentId, source: "land-detail" })).text}`,
 		};
 	}
 
-	// Full suite failed on merged main — determine whether branch introduced new failures.
-	await git(["reset", "--hard", p.head0], p.repo).catch(() => {});
+	// Full suite failed on merged main — reset to base to run the base gate (H-1: checked). If the
+	// reset itself fails, main is in an unknown state and the base comparison would be meaningless —
+	// bail with the halt already set rather than compare against a half-reset tree.
+	if (!(await restoreOrHalt(p.repo, p.head0))) {
+		return { ok: false, committed: p.committed, merged: false, retryable: false, message: p.message, detail: `regression gate: could not reset ${p.repo} to base for the comparison run — main may be in an unknown state; further lands halted until a human clears it` };
+	}
 	const baseRun = await runGate(fullSuite, p.repo);
 	// The BASE run must be runnable too: comparing a real merged red against an unrunnable base
 	// would mis-attribute every merged failure as "new" (or worse). Same fail-closed refusal.
@@ -826,8 +837,8 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 		if (opts.conflictMarkerGate !== false && conflictMarkerGateEnabled()) {
 			const markerReason = await conflictMarkerReasonForRange(repo, head0, "HEAD");
 			if (markerReason) {
-				await git(["reset", "--hard", head0], repo).catch(() => {});
-				return { ok: false, committed, merged: false, message, detail: markerReason };
+				const restored = await rollbackSuffix(repo, head0);
+				return { ok: false, committed, merged: false, message, detail: `${markerReason}${restored}` };
 			}
 		}
 		if (!gate) {
@@ -857,14 +868,14 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 			// verification failure below.
 			const unproven = greenGateUnproven(v, gate);
 			if (unproven) {
-				await git(["reset", "--hard", head0], repo).catch(() => {});
+				const restored = await rollbackSuffix(repo, head0);
 				return {
 					ok: false,
 					committed,
 					merged: false,
 					retryable: true,
 					message,
-					detail: `acceptance gate could not be trusted (${unproven}): ${gate} — refusing to land on an unproven pass; main rolled back\n${await excerptForDetail(v.output, 300, opts.agentId)}`,
+					detail: `acceptance gate could not be trusted (${unproven}): ${gate} — refusing to land on an unproven pass${restored}\n${await excerptForDetail(v.output, 300, opts.agentId)}`,
 				};
 			}
 			// Acceptance gate green — additionally run the full-suite regression gate if armed.
@@ -874,8 +885,11 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 			await recordMainProof(repo, gate, true, `${detail}; verified (${gate})\n${(await reduceOutput(v.output, 800, { command: gate, agentId: opts.agentId, source: "land-detail" })).text}`.trim(), v.sandboxed);
 			return withMergedFacts({ ok: true, committed, merged: true, message, detail: `${detail}; verified (${gate})` });
 		}
-		// Merged gate failed — distinguish "branch regressed a green base" from "base was already red".
-		await git(["reset", "--hard", head0], repo).catch(() => {});
+		// Merged gate failed — reset to base to run the base gate for comparison (H-1: checked). A failed
+		// reset here would compare against a half-reset tree, so bail with the halt already set.
+		if (!(await restoreOrHalt(repo, head0))) {
+			return { ok: false, committed, merged: false, retryable: false, message, detail: `acceptance gate failed and ${repo} could not be reset to base for the comparison run — main may be in an unknown state; further lands halted until a human clears it` };
+		}
 		// Unrunnable acceptance gate ⇒ FAIL CLOSED (same shared classifier as applyRegressionGate):
 		// "both sides red" is only a valid red-baseline allowance when both runs actually EXERCISED
 		// the code. A missing binary (127 / executable-not-found) or a degraded bare-image sandbox
@@ -956,8 +970,8 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 		// Clean merge of a stale branch — the silent-clobber case the probe above exists for. Undo the
 		// merge (main was clean; this mirrors the failed-verify rollback) and refuse with the specifics.
 		if (staleReason) {
-			await git(["reset", "--hard", head0], repo).catch(() => {});
-			return { ok: false, committed, merged: false, retryable: staleReason.retryable, message, detail: staleReason.reason };
+			const restored = await rollbackSuffix(repo, head0);
+			return { ok: false, committed, merged: false, retryable: staleReason.retryable, message, detail: `${staleReason.reason}${restored}` };
 		}
 		return verifyMerged(`merged ${branch}`, () => git(["merge", "--no-ff", "-m", `Merge ${branch}: ${message}`, branch], repo));
 	}
@@ -1204,10 +1218,11 @@ async function attemptAutoResolve(a: {
 	const ff = await git(["merge", "--ff-only", branch], repo);
 	if (ff.code !== 0) return fail(`auto-resolve: rebased ${branch} but fast-forward failed: ${ff.stderr || ff.stdout}`);
 
-	const rollback = async (why: string): Promise<LandResult> => {
-		await git(["reset", "--hard", head0], repo).catch(() => undefined);
-		return fail(why);
-	};
+	// H-1 (round 4): the reviewer-reject and gate-fail rollbacks here used a BARE `git reset --hard`
+	// separate from the checked path — a swallowed failure left main merged while the result claimed a
+	// rollback. Route through the checked `rollbackSuffix`; `why` no longer pre-claims "rolled main
+	// back" (the suffix says so honestly, or warns + halts if the reset failed).
+	const rollback = async (why: string): Promise<LandResult> => fail(`${why}${await rollbackSuffix(repo, head0)}`);
 
 	// (c) The resolution is unproven until the gate passes on the merged main. C-1: a registered tenant
 	// runs its FULL contract (count assertions, services, runner image, sandbox policy) fail-closed —
@@ -1225,7 +1240,7 @@ async function attemptAutoResolve(a: {
 		if (gate) {
 			const v = await runGate(gate, repo);
 			gateSandboxed = v.sandboxed;
-			if (v.code !== 0) return rollback(`auto-resolved ${branch} but verification failed (${gate}) — rolled main back:\n${(await reduceOutput(v.output, 800, { command: gate, agentId, source: "land-detail" })).text}`);
+			if (v.code !== 0) return rollback(`auto-resolved ${branch} but verification failed (${gate}):\n${(await reduceOutput(v.output, 800, { command: gate, agentId, source: "land-detail" })).text}`);
 		}
 
 		// (c2) Full-suite regression gate — auto-resolved lands must not bypass it (registered repos'
@@ -1242,12 +1257,12 @@ async function attemptAutoResolve(a: {
 
 	// (d) Independent second opinion before keeping an LLM-merged result.
 	const approved = await reviewer({ repo, worktree, branch }).catch(() => false);
-	if (!approved) return rollback(`auto-resolved ${branch} but reviewer rejected the resolution — rolled main back`);
+	if (!approved) return rollback(`auto-resolved ${branch} but reviewer rejected the resolution`);
 
 	// The reviewer moved the tree ⇒ what would land is not what was gated. Re-run the manifest against
 	// the new tree (registered tenant); with no manifest we cannot cheaply re-verify, so fail closed.
 	if (await landedTreeMoved(repo, gatedTree)) {
-		if (!manifest) return rollback(`auto-resolved ${branch} but the reviewer changed the tree AFTER the gate — refusing to land an unverified tree; rolled main back`);
+		if (!manifest) return rollback(`auto-resolved ${branch} but the reviewer changed the tree AFTER the gate — refusing to land an unverified tree`);
 		const reGate = await runManifestLandGate({ manifest, repo, rollbackTo: head0, committed, message, agentId });
 		if ("refusal" in reGate) return reGate.refusal;
 		gateSandboxed = reGate.sandboxed;

@@ -42,6 +42,7 @@ import { createHash } from "node:crypto";
 import { Result, Schema } from "effect";
 import type { GateStage } from "./intake.ts";
 import { detectVerifyStages } from "./intake.ts";
+import { isSecretShaped } from "./gate-env.ts";
 
 // ── The contract ────────────────────────────────────────────────────────────────────────────────
 
@@ -186,6 +187,13 @@ function semanticManifestError(m: TenantGateManifest): string | undefined {
 		if (e.exactCounts !== undefined && e.parser !== "counts-script") {
 			return `gate "${g.name}" declares exactCounts under parser "${e.parser}" — only "counts-script" emits named counts`;
 		}
+	}
+	// L-1 (round 4): the `policy.env` re-admit list is a confused-deputy surface — an operator (or a
+	// coerced one) must not be able to name a daemon secret and have it cross into tenant-authored gate
+	// code. Reject at registration so the operator learns immediately; the runtime `tenantGateEnv` floor
+	// is the defense-in-depth behind it.
+	for (const name of m.policy?.env ?? []) {
+		if (isSecretShaped(name)) return `policy.env names "${name}", which is secret-shaped — a gate env allowlist may not re-admit daemon secrets (DATABASE_URL, *_API_KEY, *_TOKEN, *_SECRET, SECRET_*)`;
 	}
 	return undefined;
 }

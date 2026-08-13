@@ -323,6 +323,87 @@ describe("THEME B (SECURITY) — the tenant gate env is a POSITIVE ALLOWLIST, no
 	});
 });
 
+describe("Round 4 (SECURITY) — the allowlist reaches EVERY env-handing seam, not just the gate", () => {
+	const withSecrets = async (body: () => Promise<void>): Promise<void> => {
+		const names = ["SECRET_CANARY", "DATABASE_URL", "VENDOR_API_KEY"] as const;
+		const saved = Object.fromEntries(names.map((n) => [n, process.env[n]]));
+		for (const n of names) process.env[n] = `leak-${n}`;
+		process.env.PATH ??= "/usr/bin";
+		try { await body(); } finally { for (const n of names) { if (saved[n] === undefined) delete process.env[n]; else process.env[n] = saved[n]; } }
+	};
+
+	test("C-1 FLIP: SECRET_CANARY / DATABASE_URL are ABSENT from the TEARDOWN exec env", async () => {
+		await withSecrets(async () => {
+			const teardownEnvs: (Record<string, string> | undefined)[] = [];
+			const gate: TenantGate = { name: "unit", command: "pnpm test", timeoutMs: 1000, expects: { exit: 0, parser: "raw" }, teardown: "pnpm clean" };
+			await runManifestGates({
+				manifest: contract([gate]),
+				cwd: "/wt",
+				dockerProbe: hasDocker,
+				exec: async (command, _cwd, o) => {
+					if (command === "pnpm clean") teardownEnvs.push(o.env); // capture the TEARDOWN env specifically
+					return { code: 0, stdout: "", stderr: "", sandboxed: true };
+				},
+			});
+			expect(teardownEnvs).toHaveLength(1);
+			const env = teardownEnvs[0]!;
+			// The teardown is tenant-authored too — round 3 fixed the gate, round 4 fixes the teardown.
+			expect(env.SECRET_CANARY).toBeUndefined();
+			expect(env.DATABASE_URL).toBeUndefined();
+			expect(env.VENDOR_API_KEY).toBeUndefined();
+			expect(env.PATH).toBeDefined(); // still an operational env, not empty
+		});
+	});
+
+	test("C-2 FLIP: secrets are ABSENT from the env passed to the compose lifecycle (up AND down)", async () => {
+		await withSecrets(async () => {
+			const composeEnvs: (Record<string, string> | undefined)[] = [];
+			await runManifestGates({
+				manifest: contract([serviceGate]),
+				cwd: "/wt",
+				dockerProbe: hasDocker,
+				// capture the env handed to `docker compose up`/`down` — the interpolation source C-2 names.
+				serviceSpawn: async (_argv, _cwd, o) => { composeEnvs.push(o?.env); return { code: 0, output: "" }; },
+				exec: async () => ({ code: 0, stdout: "", stderr: "", sandboxed: true }),
+			});
+			expect(composeEnvs.length).toBeGreaterThanOrEqual(2); // up + down
+			for (const env of composeEnvs) {
+				expect(env).toBeDefined();
+				expect(env?.SECRET_CANARY).toBeUndefined();
+				expect(env?.DATABASE_URL).toBeUndefined(); // ${DATABASE_URL} has nothing to interpolate
+				expect(env?.VENDOR_API_KEY).toBeUndefined();
+			}
+		});
+	});
+
+	test("L-1 FLIP: a policy.env naming DATABASE_URL is REJECTED at registration, not honored", () => {
+		const bad = decodeTenantGateManifest({ version: 1, repo: "/repo", policy: { env: ["DATABASE_URL"] }, gates: [{ name: "t", command: "x", timeoutMs: 1, expects: { exit: 0, parser: "raw" } }] });
+		expect("error" in bad && bad.error).toContain("secret-shaped");
+		// and a *_TOKEN / SECRET_* name is caught the same way
+		for (const name of ["MY_API_KEY", "SESSION_TOKEN", "SECRET_CANARY", "FOO_SECRET"]) {
+			const r = decodeTenantGateManifest({ version: 1, repo: "/repo", policy: { env: [name] }, gates: [{ name: "t", command: "x", timeoutMs: 1, expects: { exit: 0, parser: "raw" } }] });
+			expect("error" in r).toBe(true);
+		}
+	});
+
+	test("L-1 runtime floor: even if a secret-shaped name reaches tenantGateEnv's allow, it is NOT admitted", async () => {
+		// Defense-in-depth behind the decode-time reject: the runtime allowlist floor rejects it too.
+		await withSecrets(async () => {
+			let captured: Record<string, string> | undefined;
+			// `env` allowlist here bypasses decode (constructed raw), simulating any path that reaches the
+			// runtime env builder with a secret-shaped name — the floor still drops it.
+			await runManifestGates({
+				manifest: { version: 1, repo: "/repo", policy: { sandboxStrict: false, env: ["PATH"] }, gates: [{ name: "t", command: "x", timeoutMs: 1000, expects: { exit: 0, parser: "raw" } }] },
+				cwd: "/wt",
+				dockerProbe: hasDocker,
+				exec: async (_c, _cwd, o) => { captured = o.env; return { code: 0, stdout: "", stderr: "", sandboxed: true }; },
+			});
+			expect(captured?.DATABASE_URL).toBeUndefined();
+			expect(captured?.SECRET_CANARY).toBeUndefined();
+		});
+	});
+});
+
 describe("H-2 — runnerImage becomes the ACTUAL sandbox image, or runner-unavailable", () => {
 	const browserGate: TenantGate = { name: "e2e", command: "pnpm e2e", timeoutMs: 1000, expects: { exit: 0, parser: "raw" }, requires: { runnerImage: "mcr.microsoft.com/playwright:v1.50.0" } };
 

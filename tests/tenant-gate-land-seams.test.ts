@@ -228,6 +228,18 @@ describe("THEME A · the reviewer cannot slip an ungated tree past the manifest 
 		expect(res.detail).toContain("REFUSED");
 		expect(await out(repo, "rev-parse", "HEAD")).toBe(head0); // rolled back — the reviewer's tree never landed
 	}, 60_000);
+
+	test("H-1: the reviewer-REJECT rollback is now the CHECKED path (honest 'main rolled back' + HEAD===head0)", async () => {
+		await proofRoot();
+		const { repo, wt, head0 } = await conflictingBranch("seam-h1-reject-");
+		const reject = async (): Promise<boolean> => false;
+		const manifest = manifestOf(repo, [shellGate("suite", "echo ok", { exit: 0, parser: "raw" })]);
+		const res = await landAgent({ repo, worktree: wt, branch: "unit", message: "land unit", commitWip: false, verify: "", manifest, resolver: resolveToBranch, reviewer: reject });
+		expect(res.ok).toBe(false);
+		expect(res.detail).toContain("reviewer rejected");
+		expect(res.detail).toContain("main rolled back"); // the suffix only rollbackSuffix (checked path) emits
+		expect(await out(repo, "rev-parse", "HEAD")).toBe(head0);
+	}, 60_000);
 });
 
 describe("C-5 · a failed rollback halts every subsequent land", () => {

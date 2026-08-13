@@ -213,6 +213,7 @@ async function runOneGate(
 		timeoutMs: gate.timeoutMs,
 		spawn: opts.serviceSpawn,
 		dockerProbe: opts.dockerProbe,
+		policyEnv: manifestPolicyEnv, // C-2: the only daemon-env names allowed near the compose lifecycle
 	});
 	if (!services.ok) {
 		await services.stop();
@@ -224,6 +225,14 @@ async function runOneGate(
 	// sandbox network to the compose default network; the discovery vars already point at
 	// service-name:container-port, which resolves there.
 	if (services.handle.network) gatePolicy = { ...gatePolicy, sandboxNetwork: services.handle.network };
+
+	// SECURITY (round 3 THEME B + round 4 C-1): the tenant gate env is a POSITIVE ALLOWLIST — only
+	// PATH/HOME/… + the tenant's declared `policy.env` + the rail's GLANCE_SERVICE_* discovery vars
+	// cross the boundary; `gateEnv`'s suffix denylist let `SECRET_CANARY` through. Computed ONCE and
+	// reused for the gate command AND its teardown shell (round 4 C-1: the teardown exec used no `env:`
+	// override, so it fell through to `gateEnv` inside `gateExec` — secrets reached tenant-controlled
+	// teardown scripts). Both are tenant-authored code; both get the same boundary.
+	const gateChildEnv = tenantGateEnv(process.env, { allow: manifestPolicyEnv, add: services.handle.env });
 
 	// The gate runs, then teardown, then service `down` — none in a `finally`, because a failed `down`
 	// must be able to turn a GREEN gate into a refusal (a gate that "passed" with its Postgres still
@@ -242,15 +251,7 @@ async function runOneGate(
 				policy: gatePolicy,
 				requireSandbox,
 				timeoutMs: gate.timeoutMs,
-				// SECURITY, round 3 (THEME B / codex C-2): the tenant gate env is a POSITIVE ALLOWLIST, not
-				// gateEnv's suffix denylist. Round 1's H-1 fix merged service vars into gateEnv, but gateEnv
-				// is a denylist — codex reproduced `SECRET_CANARY` (no matching suffix rule) reaching the
-				// child. A registered tenant runs agent-authored code, so only PATH/HOME/… + the tenant's
-				// declared `policy.env` + the rail's GLANCE_SERVICE_* discovery vars cross the boundary; a
-				// newly-invented secret name leaks nothing because it was never on the list. Applied to
-				// BOTH the service and no-service paths (the no-service path used to fall through to
-				// gateEnv inside gateExec).
-				env: tenantGateEnv(process.env, { allow: manifestPolicyEnv, add: services.handle.env }),
+				env: gateChildEnv,
 			});
 		} catch (e) {
 			// A strict-policy sandbox refusal. Returned as a refusal rather than rethrown: the land paths
@@ -267,8 +268,10 @@ async function runOneGate(
 	let outcome = await runGate().catch((e: unknown) => refuse("runner-unavailable", `gate "${gate.name}" threw during evaluation: ${errText(e)}`));
 
 	// Teardown (the tenant's own cleanup shell) — bounded, best-effort: a non-zero teardown is the
-	// tenant's problem to notice, not grounds to fail an otherwise-green gate.
-	if (gate.teardown) await exec(gate.teardown, cwd, { mounts: opts.mounts, policy: gatePolicy, timeoutMs: gate.timeoutMs }).catch(() => undefined);
+	// tenant's problem to notice, not grounds to fail an otherwise-green gate. C-1 (round 4): it runs
+	// with the SAME positive-allowlist env as the gate — it is equally tenant-authored, so a secret
+	// must not reach it either.
+	if (gate.teardown) await exec(gate.teardown, cwd, { mounts: opts.mounts, policy: gatePolicy, timeoutMs: gate.timeoutMs, env: gateChildEnv }).catch(() => undefined);
 	// Service `down` — its failure DOES block a green receipt (H-5). If the gate already refused, keep
 	// that (more specific) refusal; if it passed but `down` failed, the pass becomes a service-unavailable
 	// refusal so a human deals with the live containers instead of the receipt hiding them.
