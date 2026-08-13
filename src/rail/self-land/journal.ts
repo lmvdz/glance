@@ -30,6 +30,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { LandReceiptIndexRow } from "../receipt/types.ts";
 import { landReceiptDir } from "../receipt/write.ts";
+import { isMeasuredLand } from "../land-metrics.ts";
 
 export type SelfLandJournalStatus = "pending" | "finalized" | "queued" | "aborted";
 
@@ -168,10 +169,17 @@ export async function unconfirmedSelfLands(stateDir: string): Promise<SelfLandJo
 	return [...latest.values()].filter((e) => e.status === "pending" || e.status === "queued");
 }
 
-/** SHA identity tolerant of an abbreviated-vs-full form on either side (gh returns either) — the same
- *  rule the self-land head guard uses. Empty on either side is never a match. */
-function sameOid(a: string | undefined, b: string | undefined): boolean {
-	if (!a || !b) return false;
+/** A well-formed git OID: 7–40 lowercase hex (the same shape `land-pr.ts`'s live merge guard requires).
+ *  Reconcile only compares heads when BOTH sides are valid OIDs — a corrupt/short journal head or a
+ *  missing/garbage GitHub head must never prefix-match a wrong commit and fold a different tree. */
+function isHexOid(s: string | undefined): s is string {
+	return typeof s === "string" && /^[0-9a-f]{7,40}$/i.test(s);
+}
+
+/** SHA identity of two VALID OIDs, tolerant of an abbreviated-vs-full form (gh returns either). Callers
+ *  must have already established both are valid hex (`isHexOid`) — an invalid side is NOT a match here,
+ *  and the caller treats "can't compare" as unconfirmable (pending), never as a mismatch-to-abort. */
+function sameOid(a: string, b: string): boolean {
 	const x = a.toLowerCase();
 	const y = b.toLowerCase();
 	return x === y || x.startsWith(y) || y.startsWith(x);
@@ -188,6 +196,12 @@ export interface QueuedPrState {
 	headOid?: string;
 	/** The merge commit OID, when the PR merged — becomes the folded row's `commit`. */
 	mergeCommit?: string;
+	/** The PR's base branch NAME at read time — checked against the authorized `base` so a retargeted PR
+	 *  is never folded as landing where we authorized (mirrors the live merge guard's base check). */
+	baseRef?: string;
+	/** Epoch ms the PR merged (`gh pr view --json mergedAt`) — the folded row's `at`, so a land that sat
+	 *  in a merge queue across a UTC day is bucketed on the MERGE day, not the enqueue day. */
+	mergedAt?: number;
 }
 
 /** Reads GitHub for one unconfirmed entry; returns undefined on a transient fault (which must leave the
@@ -203,31 +217,46 @@ export interface ReconcileOutcome {
 	detail: string;
 	/** The merge commit, on a `folded` outcome. */
 	commit?: string;
+	/** Whether a `folded` row counts as MEASURED (`isMeasuredLand`) or only as an (unmeasured) land —
+	 *  so the drain's summary can say how many folds were measured instead of labelling every fold
+	 *  "measured" (a crash-orphaned pending folds as an unmeasured land; a queued row with n=0 too). */
+	measured?: boolean;
 }
 
 /**
  * Settle every UNCONFIRMED self-land (`queued`/`pending`) against GitHub (glance#392 item 5) — the
  * read-side that completes B2's persist-as-`queued` / never-count. For each entry the injected reader
- * re-reads the PR, and this decides its fate:
- *   - MERGED at the GATED head (headOid matches) AND the entry carries its measured `row` ⇒ FOLD:
- *     append a `finalized` entry (the row + the real merge commit) so the window counts the measured
- *     land it would otherwise have lost. Idempotent — a re-run sees `finalized` (no longer unconfirmed)
- *     and skips it; `journalRowsForWindow` then folds it, deduped by (branch, commit).
- *   - MERGED but the head MOVED (a merge-queue rewrote the tree we measured), or CLOSED unmerged ⇒
- *     ABORT: the gated tree is not what landed / will never land, so this measured attempt is void. A
- *     rewritten descendant needs its OWN self-land + fresh measurement, never a silent count here.
- *   - still OPEN / still queued ⇒ leave PENDING (unchanged) — reconciled again on the next drain.
- *   - reader fault (transient gh/network), or a crash-orphaned `pending` with no measured row we could
- *     reconstruct ⇒ leave PENDING; NEVER aborted on a fault (that would drop a possibly-merged land —
- *     the undercount direction this whole path guards).
- * A journal WRITE fault while folding/aborting is reported (as `unreadable`/pending for a fold) but
- * never throws — the drain must still produce its ledger row.
+ * re-reads the PR, and this decides its fate (every branch chosen in the UNDERCOUNT-safe direction: a
+ * real land must never be dropped, an unconfirmable one is left pending, only a definitively-settled
+ * one is folded or aborted):
+ *   - MERGED, and BOTH the gated head and the live head are valid OIDs that MATCH, and a base check
+ *     passes ⇒ FOLD: append a `finalized` entry (the carried measured `row`, or a minimal
+ *     landed-but-UNMEASURED row for a crash-orphaned `pending` that carried none, stamped with the real
+ *     merge commit + MERGE time) so the window counts the land it would otherwise have lost. Idempotent
+ *     — a re-run sees `finalized` (no longer unconfirmed) and skips it.
+ *   - MERGED, both heads valid, but they DIFFER, or the live base ≠ the authorized base ⇒ ABORT: a
+ *     DIFFERENT tree/base landed than we gated (a merge-queue rewrite, a retarget). This measured
+ *     attempt is void; the rewritten head needs its own self-land + fresh measurement.
+ *   - CLOSED unmerged ⇒ ABORT: it will never complete.
+ *   - MERGED but a head is MISSING/UNREADABLE, or MERGED-and-matched but no merge commit yet, or still
+ *     OPEN/queued ⇒ leave PENDING — never aborted on anything we cannot positively confirm.
+ *   - reader fault (transient gh/network) ⇒ leave PENDING, reported `unreadable`.
+ * A journal WRITE fault while folding/aborting NEVER throws and is reported as `unreadable`/`pending`
+ * (the entry stays unconfirmed and is retried next drain) — the summary never claims a settle that
+ * didn't durably land. `KNOWN LIMITATION (C-2, deferred to Lars)`: a matched head + base does not, on
+ * its own, prove GitHub's merge-GROUP tree equals the scratch tree we measured — a concurrent merge
+ * queue can combine other PRs. The dogfood window is serial / operator-routed, so this holds, exactly
+ * as the live land path's C-2 note documents; full merge-group-tree verification is the same deferred
+ * concurrent-setting work, not this read-side.
  */
 export async function reconcileUnconfirmedSelfLands(stateDir: string, read: QueuedPrReader): Promise<ReconcileOutcome[]> {
 	const pending = await unconfirmedSelfLands(stateDir);
 	const out: ReconcileOutcome[] = [];
 	for (const e of pending) {
 		const tag = `${e.branch}${e.prNumber ? ` (#${e.prNumber})` : ""}`;
+		const leavePending = (detail: string, action: ReconcileAction = "pending"): void => {
+			out.push({ id: e.id, branch: e.branch, prNumber: e.prNumber, action, detail });
+		};
 		let state: QueuedPrState | undefined;
 		try {
 			state = await read(e);
@@ -235,33 +264,66 @@ export async function reconcileUnconfirmedSelfLands(stateDir: string, read: Queu
 			state = undefined;
 		}
 		if (!state || typeof state.state !== "string") {
-			out.push({ id: e.id, branch: e.branch, prNumber: e.prNumber, action: "unreadable", detail: `could not re-read PR state for ${tag} — left pending (never aborted on a read fault)` });
+			leavePending(`could not re-read PR state for ${tag} — left pending (never aborted on a read fault)`, "unreadable");
 			continue;
 		}
 		const st = state.state.toUpperCase();
-		const headMatches = sameOid(state.headOid, e.headOid);
-		if (st === "MERGED" && headMatches && state.mergeCommit && e.row) {
+
+		if (st === "MERGED") {
+			// Can we positively confirm WHICH head merged? Only if both the gated head and the live head
+			// are valid OIDs. A missing/garbage head on either side is UNCONFIRMABLE — leave pending, never
+			// abort (aborting a possibly-gated-head merge is the exact drop this path guards).
+			if (!isHexOid(e.headOid) || !isHexOid(state.headOid)) {
+				leavePending(`${tag} is MERGED but its head could not be confirmed (gated=${e.headOid || "?"}, live=${state.headOid ?? "?"}) — left pending, never aborted on an unconfirmable head`);
+				continue;
+			}
+			if (!sameOid(state.headOid, e.headOid)) {
+				await journalAborted(stateDir, e.id, { repo: e.repo, branch: e.branch, headOid: e.headOid, base: e.base, detail: `${tag} merged at head ${state.headOid.slice(0, 12)} — NOT the gated ${e.headOid.slice(0, 12)} (a merge-queue/rebase rewrote the tree). The measured attempt is void; the rewritten head needs its own self-land.` }).catch(() => {});
+				leavePending(`${tag} merged at a non-gated head — measured attempt void`, "aborted");
+				continue;
+			}
+			// Base check (mirrors the live merge guard): a retargeted PR landed somewhere we did not authorize.
+			if (typeof state.baseRef === "string" && state.baseRef.length > 0 && state.baseRef !== e.base) {
+				await journalAborted(stateDir, e.id, { repo: e.repo, branch: e.branch, headOid: e.headOid, base: e.base, detail: `${tag} merged into ${state.baseRef}, not the authorized ${e.base} — a retarget. The measured attempt is void.` }).catch(() => {});
+				leavePending(`${tag} merged into a non-authorized base (${state.baseRef} ≠ ${e.base}) — measured attempt void`, "aborted");
+				continue;
+			}
+			if (!isHexOid(state.mergeCommit)) {
+				leavePending(`${tag} is MERGED at the gated head but its merge commit is not yet readable — left pending`);
+				continue;
+			}
 			const commit = state.mergeCommit;
-			const row: LandReceiptIndexRow = { ...e.row, commit, landId: `${e.branch}\0${commit}` };
+			const at = typeof state.mergedAt === "number" && Number.isFinite(state.mergedAt) ? state.mergedAt : e.row?.at ?? e.at;
+			// The carried measured row (queued path), or a minimal landed-but-UNMEASURED row for a
+			// crash-orphaned `pending` that never journaled one — either way the land is not lost. The
+			// unmeasured fallback is honest: its measurement was lost to the crash, so it counts as a land,
+			// never as measured (`isMeasuredLand` fails closed on the absent verdict/precision).
+			const row: LandReceiptIndexRow = e.row
+				? { ...e.row, at, commit, landId: `${e.branch}\0${commit}` }
+				: { at, repo: e.repo, branch: e.branch, commit, landed: true, forced: false, gateStatus: "green", ...(e.criteriaSource ? { criteriaSource: e.criteriaSource } : {}), landId: `${e.branch}\0${commit}` };
+			const measured = isMeasuredLand(row);
 			try {
 				await journalFinalized(stateDir, e.id, { repo: e.repo, branch: e.branch, headOid: e.headOid, base: e.base, landedCommit: commit, row });
-				out.push({ id: e.id, branch: e.branch, prNumber: e.prNumber, action: "folded", commit, detail: `${tag} merged at the gated head ${e.headOid.slice(0, 12)} → folded as measured (merge commit ${commit.slice(0, 12)})` });
+				out.push({ id: e.id, branch: e.branch, prNumber: e.prNumber, action: "folded", commit, measured, detail: `${tag} merged at the gated head ${e.headOid.slice(0, 12)} → folded as ${measured ? "measured" : "an (unmeasured) land"} (merge commit ${commit.slice(0, 12)})` });
 			} catch (err) {
-				out.push({ id: e.id, branch: e.branch, prNumber: e.prNumber, action: "unreadable", detail: `${tag} merged at the gated head but the finalize-journal write FAILED (${String(err)}) — left pending, retry the drain` });
+				leavePending(`${tag} merged at the gated head but the finalize-journal write FAILED (${String(err)}) — left pending, retry the drain`, "unreadable");
 			}
 			continue;
 		}
-		if (st === "MERGED" && !headMatches) {
-			await journalAborted(stateDir, e.id, { repo: e.repo, branch: e.branch, headOid: e.headOid, base: e.base, detail: `${tag} merged, but at head ${state.headOid?.slice(0, 12) ?? "unknown"} — NOT the gated ${e.headOid.slice(0, 12)} (a merge-queue rewrote the tree). The measured attempt is void; the rewritten head needs its own self-land.` }).catch(() => {});
-			out.push({ id: e.id, branch: e.branch, prNumber: e.prNumber, action: "aborted", detail: `${tag} merged at a non-gated head — measured attempt void` });
-			continue;
-		}
+
 		if (st === "CLOSED") {
-			await journalAborted(stateDir, e.id, { repo: e.repo, branch: e.branch, headOid: e.headOid, base: e.base, detail: `${tag} closed without merging — the queued land will never complete.` }).catch(() => {});
-			out.push({ id: e.id, branch: e.branch, prNumber: e.prNumber, action: "aborted", detail: `${tag} closed unmerged` });
+			try {
+				await journalAborted(stateDir, e.id, { repo: e.repo, branch: e.branch, headOid: e.headOid, base: e.base, detail: `${tag} closed without merging — the queued land will never complete.` });
+				leavePending(`${tag} closed unmerged`, "aborted");
+			} catch (err) {
+				// The abort could not be durably recorded — the entry stays queued and is retried; report it
+				// honestly as unreadable, never as a completed abort the journal doesn't reflect.
+				leavePending(`${tag} closed unmerged but the abort-journal write FAILED (${String(err)}) — left pending, retry the drain`, "unreadable");
+			}
 			continue;
 		}
-		out.push({ id: e.id, branch: e.branch, prNumber: e.prNumber, action: "pending", detail: `${tag} state=${state.state} — awaiting confirmation` });
+
+		leavePending(`${tag} state=${state.state} — awaiting confirmation`);
 	}
 	return out;
 }

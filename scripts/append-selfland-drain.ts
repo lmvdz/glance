@@ -85,18 +85,26 @@ const doReconcile = !flags["dry-run"] && !flags["no-reconcile"];
 if (doReconcile) {
 	const reader: QueuedPrReader = async (e) => {
 		const target = e.prNumber && e.prNumber > 0 ? String(e.prNumber) : e.branch;
-		const j = await ghJson<{ state?: unknown; headRefOid?: unknown; mergeCommit?: unknown }>(["pr", "view", target, "--repo", e.repo, "--json", "state,headRefOid,mergeCommit"], process.cwd());
+		const j = await ghJson<{ state?: unknown; headRefOid?: unknown; mergeCommit?: unknown; baseRefName?: unknown; mergedAt?: unknown }>(["pr", "view", target, "--repo", e.repo, "--json", "state,headRefOid,mergeCommit,baseRefName,mergedAt"], process.cwd());
 		if (!j || typeof j !== "object" || typeof j.state !== "string") return undefined;
 		const mc = j.mergeCommit && typeof j.mergeCommit === "object" ? (j.mergeCommit as { oid?: unknown }).oid : undefined;
-		return { state: j.state, headOid: typeof j.headRefOid === "string" ? j.headRefOid : undefined, mergeCommit: typeof mc === "string" ? mc : undefined };
+		const mergedMs = typeof j.mergedAt === "string" ? Date.parse(j.mergedAt) : undefined;
+		return {
+			state: j.state,
+			headOid: typeof j.headRefOid === "string" ? j.headRefOid : undefined,
+			mergeCommit: typeof mc === "string" ? mc : undefined,
+			baseRef: typeof j.baseRefName === "string" ? j.baseRefName : undefined,
+			mergedAt: mergedMs !== undefined && Number.isFinite(mergedMs) ? mergedMs : undefined,
+		};
 	};
 	try {
 		const outcomes = await reconcileUnconfirmedSelfLands(stateDir, reader);
-		const folded = outcomes.filter((o) => o.action === "folded").length;
+		const folds = outcomes.filter((o) => o.action === "folded");
+		const foldedMeasured = folds.filter((o) => o.measured).length;
 		const aborted = outcomes.filter((o) => o.action === "aborted").length;
 		const stillPending = outcomes.filter((o) => o.action === "pending" || o.action === "unreadable").length;
 		for (const o of outcomes) console.error(`reconcile: ${o.action} — ${o.detail}`);
-		if (outcomes.length) reconcileNote = `; reconciled ${outcomes.length} unconfirmed (${folded} folded as measured, ${aborted} aborted, ${stillPending} still pending)`;
+		if (outcomes.length) reconcileNote = `; reconciled ${outcomes.length} unconfirmed (${folds.length} folded [${foldedMeasured} measured], ${aborted} aborted, ${stillPending} still pending)`;
 	} catch (err) {
 		console.error(`append-selfland-drain: reconcile step failed (non-fatal, count proceeds from the index+journal as-is): ${String(err)}`);
 	}
@@ -111,7 +119,11 @@ let unconfirmed = 0;
 try {
 	const folded = await journalRowsForWindow(stateDir, read!.rows);
 	if (folded.length) read = { rows: [...read!.rows, ...folded], malformed: read!.malformed };
-	unconfirmed = (await unconfirmedSelfLands(stateDir)).length;
+	// Scope the "awaiting confirmation" floor to --repo when given (grok/codex gauntlet): the journal
+	// spans every repo sharing the state dir, so an unfiltered count would let a stale queued land from
+	// ANOTHER repo inflate this repo's floor. Unfiltered only when the row itself is unfiltered.
+	const allUnconfirmed = await unconfirmedSelfLands(stateDir);
+	unconfirmed = (repo ? allUnconfirmed.filter((e) => e.repo === repo) : allUnconfirmed).length;
 } catch (err) {
 	fail(`cannot read the self-land journal under ${stateDir} (${err instanceof Error ? err.message : String(err)}) — the measured-land fallback is unreadable; the count is unmeasurable, not empty`);
 }

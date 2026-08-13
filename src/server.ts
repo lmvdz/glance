@@ -1199,7 +1199,14 @@ export class SquadServer {
 			// URL points at when GLANCE_RECEIPT_BASE_URL is set. Each manager validates the name and scopes
 			// it strictly under its own land-receipts/ dir (no traversal); the first manager that has it
 			// wins. Absent ⇒ 404, never a directory listing or a path echo.
-			const name = decodeURIComponent(receiptFileMatch[1]);
+			let name: string;
+			try {
+				name = decodeURIComponent(receiptFileMatch[1]);
+			} catch {
+				// A malformed percent-escape (`%` not followed by two hex digits) throws URIError; `handle`
+				// isn't wrapped, so that would surface as a 500. A bad name is simply not found.
+				return new Response("receipt not found", { status: 404 });
+			}
 			for (const m of managers) {
 				const html = await m.readLandReceiptHtml(name);
 				if (html !== undefined) return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });

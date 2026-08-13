@@ -5240,8 +5240,12 @@ export class SquadManager extends EventEmitter {
 					// merge at the gated head. gateStatus is `green` by CONSTRUCTION: a self-land reaches
 					// `gh pr merge` only after the scratch acceptance+regression gate passed AND
 					// `requireValidationPass` (so `classifyLand(result)`, which would read the enqueue as
-					// "failed" off `result.ok`, is deliberately NOT used here). No `commit`/`landId` yet — the
-					// merge commit isn't known until the queue completes; reconcile stamps it.
+					// "failed" off `result.ok`, is deliberately NOT used here). CAVEAT (grok gauntlet): a
+					// red-baseline pass (main already red, no NEW failures) is not separately distinguished for
+					// an enqueued land and is recorded as `green` — rare for glance's own normally-green main,
+					// and the MEASURED count (`isMeasuredLand`) is independent of gateStatus regardless. No
+					// `commit`/`landId` yet — the merge commit isn't known until the queue completes; reconcile
+					// stamps it (with the real merge time as `at`).
 					const queuedRow = landReceiptIndexRow({
 						repo: slug,
 						branch,
@@ -12557,6 +12561,17 @@ export class SquadManager extends EventEmitter {
 		const file = path.join(dir, name);
 		const rel = path.relative(dir, file);
 		if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return undefined;
+		// Symlink guard (grok/codex gauntlet): the lexical checks above stop `../` traversal, but
+		// `readFile` FOLLOWS symlinks — a validly-named `leak.html` symlink planted in the receipts dir
+		// would otherwise serve an arbitrary daemon-readable file as same-origin HTML. `lstat` (no-follow)
+		// + a real-regular-file assertion closes that: only a genuine regular file directly in the dir is
+		// served; a symlink, dir, or device is rejected. Receipts glance itself writes are always regular.
+		try {
+			const st = await fs.lstat(file);
+			if (!st.isFile()) return undefined; // isFile() is false for a symlink (lstat), dir, socket, etc.
+		} catch {
+			return undefined; // absent / unreadable
+		}
 		return fs.readFile(file, "utf8").catch(() => undefined);
 	}
 

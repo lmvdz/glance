@@ -235,6 +235,13 @@ export async function writeLandReceipt(stateDir: string, receipt: LandReceipt, o
  * Never emits a broken local-path link. `htmlPath` is the absolute path `writeLandReceipt` returned;
  * only its basename is used to form the served URL (the file lives under the receipts dir the route
  * scopes to).
+ *
+ * AUTH CAVEAT (grok/codex gauntlet): the served route is viewer-tier and sits behind the daemon's auth
+ * gate. A top-level browser navigation from GitHub cannot attach an `Authorization: Bearer` header, so
+ * in FILE mode WITH a token the link 401s. Set `GLANCE_RECEIPT_BASE_URL` only where the route is
+ * reachable without a bearer header — DB mode (cookie auth attaches to navigation), or a
+ * tunnel/localhost with no token. When it isn't set, the comment's own summary table is the fallback
+ * (the receipt is still readable, just not one-click). See the env var's note in .env.example.
  */
 export function receiptCommentOptions(htmlPath: string): CommentOptions {
 	const base = process.env.GLANCE_RECEIPT_BASE_URL?.trim();

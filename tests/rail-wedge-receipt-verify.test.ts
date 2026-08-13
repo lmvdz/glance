@@ -95,6 +95,15 @@ test("headCommit takes precedence over commit: commit matches the head but headC
 	expect(v.reason).toBe("sha-mismatch");
 });
 
+test("a receipt with NO landed commit but a matching headCommit is REJECTED — headCommit never substitutes for the landed commit", () => {
+	// The codex-gauntlet hole: `headCommit ?? commit` alone would green `commit:undefined, landed:true,
+	// headCommit===head`. A landed receipt MUST identify its merge commit; require it first.
+	const v = verifyReceiptForPr(receipt({ commit: undefined, headCommit: HEAD_SHA }), "acme", "widgets", HEAD_SHA, { now: NOW });
+	expect(v.ok).toBe(false);
+	if (v.ok) throw new Error("unreachable");
+	expect(v.reason).toBe("sha-mismatch");
+});
+
 test("no headCommit ⇒ falls back to commit (agent/post-merge receipt semantics unchanged)", () => {
 	// A receipt with no headCommit keeps matching on `commit` exactly as before.
 	const v = verifyReceiptForPr(receipt({ commit: HEAD_SHA }), "acme", "widgets", HEAD_SHA, { now: NOW });

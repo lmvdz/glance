@@ -58,24 +58,31 @@ try {
 } catch (err) {
 	fail(`cannot read the land-receipt index under ${stateDir} (${String(err)}) — the index is unmeasurable, not empty`);
 }
+const now = Date.now();
+const untilDay = utcDayOf(now);
+const sinceMs = now - (days - 1) * 86_400_000;
+const sinceDay = utcDayOf(sinceMs);
+
 let unconfirmedCount = 0;
 try {
 	const folded = await journalRowsForWindow(stateDir, read!.rows);
 	if (folded.length) read = { rows: [...read!.rows, ...folded], malformed: read!.malformed };
-	unconfirmedCount = (await unconfirmedSelfLands(stateDir)).length;
+	// Scope the unconfirmed floor to --repo AND the window (grok/codex gauntlet): the journal spans every
+	// repo sharing the state dir, so an unfiltered count would let a stale queued land from ANOTHER repo
+	// (or one outside this window) wrongly mark THIS scoped window `hasUnconfirmed`.
+	const allUnconfirmed = await unconfirmedSelfLands(stateDir);
+	unconfirmedCount = allUnconfirmed.filter((e) => (repo == null || e.repo === repo) && utcDayOf(e.at) >= sinceDay && utcDayOf(e.at) <= untilDay).length;
 } catch (err) {
 	fail(`cannot read the self-land journal under ${stateDir} (${String(err)}) — the measured-land fallback is unreadable; the table is unmeasurable, not empty`);
 }
 
-const now = Date.now();
 const w = landMetricsWindow(read!, days, now, repo);
 
-// 2) The rows that fall inside the window (after the optional repo filter), for the per-PR table.
-const untilDay = utcDayOf(now);
-const sinceMs = now - (days - 1) * 86_400_000;
-const sinceDay = utcDayOf(sinceMs);
+// 2) The LANDED rows in the window (after the optional repo filter), for the routed-PR table. Only
+// landed rows — a `landed:false` row is a rejected attempt, not a routed land, and must not populate a
+// table whose totals (`w.lands`) count only lands, nor contradict the `zeroRouted` validity fact.
 const inWindow = read!.rows
-	.filter((r) => (repo == null || r.repo === repo) && utcDayOf(r.at) >= sinceDay && utcDayOf(r.at) <= untilDay)
+	.filter((r) => r.landed && (repo == null || r.repo === repo) && utcDayOf(r.at) >= sinceDay && utcDayOf(r.at) <= untilDay)
 	.sort((a, b) => a.at - b.at);
 
 interface VerdictRow {
@@ -131,9 +138,12 @@ interface LineageSummary {
 const lineageMap = new Map<string, LineageSummary>();
 for (const r of inWindow) {
 	const p = r.precision;
-	if (!p) continue;
+	// Only a MEASURED land contributes — both the count AND the "latest stamp". A precision-bearing but
+	// unmeasured row (abstain, forced, corrupt/unreadable ledger) must never supply the displayed
+	// "latest measured precision" (grok/codex gauntlet).
+	if (!p || !isMeasuredLand(r)) continue;
 	const cur = lineageMap.get(p.lineage) ?? { lineage: p.lineage, measuredLands: 0, latestAt: -1 };
-	if (isMeasuredLand(r)) cur.measuredLands++;
+	cur.measuredLands++;
 	if (r.at >= cur.latestAt) {
 		cur.latestAt = r.at;
 		cur.latestN = p.n;
