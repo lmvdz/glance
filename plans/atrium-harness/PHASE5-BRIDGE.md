@@ -14,14 +14,14 @@
 
 ## 0. The finding this document now leads with
 
-Three rounds of review converged on something larger than a defect list. **Atrium's acceptance engine structurally resists the shape this bridge assumed** — "stage a reading into the room and let the ledger surface it." A blind, code-verified precondition review (round 4) reduced the resistance to **two** genuine atrium preconditions, neither of which is a bug.
+Four rounds of review converged on something larger than a defect list. **Atrium's acceptance engine structurally resists the shape this bridge assumed** — "stage a reading into the room and let the ledger surface it." The resistance settled into **two atrium migrations (P1, P3) plus one coordination requirement (P2) that either repo can satisfy but neither does today** — none of them a bug.
 
 The engine is built on one premise: *a machine reading is an extraction from messages people wrote, and it is certifiable to the degree the surrounding conversation corroborates it.* A land receipt is not that. It is a machine **reporting on the outside world**, and it arrives as the newest thing in the room with nothing after it and nothing before it that it was read out of. Every gate that makes machine readings safe is measuring a property a land receipt cannot have.
 
 That is not a patch list. It is the code telling the truth about what Phase 5 would have to fund. So this document now does two jobs:
 
 1. **§4 — what ships today**, with zero atrium changes: receipts as room messages, and a human-staged path into the ledger. This is real and it is degraded, and §4.3 says exactly how.
-2. **§12 — what atrium must build** before the automatic `~ → ✓` loop is sound: **two** preconditions (P1 and P3), each quoting the code that forces it.
+2. **§12 — what atrium must build** before the automatic `~ → ✓` loop is sound: **two** atrium migrations (P1 and P3), plus **one coordination requirement (P2)** either side can satisfy, each quoting the code that forces it.
 
 Everything between is the bridge design that becomes correct once §12 is funded.
 
@@ -31,16 +31,16 @@ Everything between is the bridge design that becomes correct once §12 is funded
 |---|---|---|
 | Trust seam is unlocked (`mintAgentSession` issues a real session) | **SOLVED** | §6 |
 | Full envelope stripped by `DecisionPayload`'s zod | **SOLVED** | §9.3 |
-| Certifiable window — receipt is always the newest message | **NAMED — P1 (atrium)** | §12.1 |
-| Interpretation exclusion is policy, no author filter exists | **NAMED — P3 (atrium)** | §12.2 |
-| Attention persistence only via the interpreter | **SOLVED — bridge-side** | §7.3 |
+| Certifiable window — receipt is always the newest message | **NAMED — P1 (atrium migration)** | §12.1 |
+| Interpretation exclusion is policy, no author filter exists | **NAMED — P3 (atrium migration)** | §12.2 |
+| Attention persistence — reconcile is not concurrency-safe | **NAMED — P2 (coordination, either side)** | §7.3 |
 | `proposal.id` not tenant/room scoped against a global PK | **SOLVED** | §9.5 |
 | Content hash is content-identity, not occurrence-identity | **SOLVED** | §9.5 |
 | §8.5 outbox does not survive the fire-and-forget crash window | **SOLVED** | §10.5 |
 | Credential revocation not re-checked at append | **SOLVED** | §6.4 |
 | Staging insert not transactionally tied to the enqueue | **SOLVED** | §7.2 |
 
-**Two atrium preconditions, not three.** Round 3 named three; round 4's code-verified review demoted attention-persistence to bridge-side work (`reconcileStoredAttention` is exported and self-contained — §7.3), leaving **P1 (§12.1)** and **P3 (§12.2)** as the genuine atrium asks. Both are confirmed against code; the demoted one is now a step of the bridge worker.
+**Two atrium migrations, plus one coordination requirement.** The count moved as the review sharpened. Round 3 named three atrium preconditions; round 4 demoted attention-persistence (P2) to bridge-side on the strength of row idempotency; a foreign-lineage cross-check then found that `reconcileStoredAttention` reads outside its write transaction and upserts unconditionally (`attention-projection.ts:43`, `:88-96`), so a second in-process writer can resurrect a dismissed item or clobber a peer's resolution. The honest result: **P1 (§12.1) and P3 (§12.2) are atrium migrations; P2 (§7.3) is a concurrency guarantee satisfiable on either side but present in neither repo today.** All three are confirmed against code, and all three are moot until P1 (§12.1) — the gating decision.
 
 **Vindicated from round 1:** the `0.9` / `never_auto_accepts` confidence choice. Round 1's remedy — confidence inside `[θ_min, θ_auto)` — was refuted against `acceptance.ts:866-880`, which returns `quiet` for every type in that band, "decisions included". That remains the design (§9.4), though P1 means it is not yet reachable.
 
@@ -255,18 +255,27 @@ Round 2 found the staging insert untied to the enqueue. The fix is the pattern a
 
 So the delivery-verification handler inserts the staging row and enqueues the bridge job **in one transaction**, through `fromDrizzle(tx, sql)`. Without it there is a window in which a delivery is durable and nothing will ever read it — the identical defect `queue.ts:20-28` records having already been caught once.
 
-### 7.3 The worker persists its own attention — bridge-side, not an atrium precondition
+### 7.3 The worker persists its own attention — bridge-side in mechanism, but carrying a concurrency precondition (P2)
 
-Round 3 named this an atrium precondition (P2), on the worry that a proposal's attention item is persisted only by the interpretation worker's Settle step (`interpret.ts:550`), which P3's exclusion (§12.2) disables. **Round 4's code-verified review resolved it the way §12.2 hypothesized: it is bridge-side work, and this is where it lives.**
+The status of this one moved three times, and the honest answer is the third position. Round 3 named it an atrium precondition (P2), on the worry that a proposal's attention item is persisted only by the interpretation worker's Settle step (`interpret.ts:550`), which P3's exclusion (§12.2) disables. Round 4's code-verified review demoted it to "bridge-side, done", on the strength of `reconcileStoredAttention` being exported and idempotent. **A foreign-lineage cross-check found that "idempotent rows" is not "safe against stale overwrite", and it is right.** The accurate position is between the two: bridge-side in *mechanism*, but requiring a *coordination guarantee* that exists in neither repo today.
 
-`reconcileStoredAttention` (`apps/server/src/attention-projection.ts:36-102`) is **exported and self-contained.** Its signature is `{ db, state, roomId, messages, now }` (`:36-42`) — it does not call `coreState()` itself; the caller supplies `state`, as the interpretation worker does at `interpret.ts:552` (`state: deps.ledger.coreState()`). The bridge worker holds `deps.ledger` and `deps.db`, so after its `appendBatch` it calls `reconcileStoredAttention` identically, with its own room and its own `coreState()`. This is a step of the worker, not a missing atrium capability.
+**The mechanism is bridge-side.** `reconcileStoredAttention` (`apps/server/src/attention-projection.ts:36-102`) is exported and self-contained — signature `{ db, state, roomId, messages, now }` (`:36-42`), and it does not call `coreState()` itself; the caller supplies `state`, as the interpretation worker does at `interpret.ts:552` (`state: deps.ledger.coreState()`). The bridge worker holds `deps.ledger` and `deps.db`, so after its `appendBatch` it can call the same function with its own room and `coreState()`. No new atrium capability is needed to *invoke* it, and the row-level conflict key `(userId, subjectKind, subjectId, class)` does prevent duplicate rows. Round 4's "no double-count" is correct as far as it goes.
 
-Two things make it safe rather than merely possible:
+**But the function is not concurrency-safe, and running it from a second in-process worker is exactly what exposes that.** It reads stored attention **outside** the write transaction — `input.db.select().from(attentionItems)` at `attention-projection.ts:43`, before the `input.db.transaction(...)` that opens at `:70` — reconciles that snapshot, then does an **unconditional** upsert of `reason`/`status`/`resolvedAt` (`:88-96`): no row lock, no version column, no status predicate on the `set`, and no per-room serialization anywhere. Today that is safe only because there is exactly one writer of attention per room — the interpretation worker, serialized by the room's own interpretation cursor. The bridge worker is a **second** writer, and it breaks that invariant. Two concrete failures, both real against the code:
 
-- **Idempotent persist.** The write is `onConflictDoUpdate` keyed on `(userId, subjectKind, subjectId, class)`, so a bridge persist and a later interpretation pass over the same room converge on one row rather than double-counting. The double-count worry round 3 raised is unfounded against the conflict key.
-- **The window is the worker's obligation.** The one real duty is passing an appropriately bounded room window in `messages` — the same discipline `interpret.ts` applies with its `readContext` collar (`interpret.ts:546-549`), which folds a bounded forward tail rather than the whole future room so that unrelated later conversation cannot silently reclassify a staged reading. The bridge worker owes the same bound. This is a bridge-side test surface, not an atrium migration.
+- **Dismissed-item resurrection.** The bridge reads an item as `pending` at `:43`; before its transaction commits, the item's owner dismisses or resolves it; the bridge's delayed upsert at `:88` writes `status: 'pending'` and `resolvedAt: null` back over the resolution, bringing back an item core says must stay gone. Read-outside-tx plus unconditional-write is a lost-update window with no guard.
+- **Peer-resolution clobber.** Two reconciliations racing on the same room are last-writer-wins on `reason`/`status`/`resolvedAt`, so a stale cycle can persist a stale resolution for an item owned by someone else.
 
-**It is moot until P1 anyway.** While every bridge proposal resolves `quiet` (§12.1), `attention.ts:827` skips it regardless of who calls the reconciler — there is no `needs_you` item to persist. This step only becomes live once P1 is solved and the proposal reaches `needs_you`; it is specified here so that when P1 lands, the bridge worker is already complete rather than acquiring a new atrium dependency.
+**So P2 is a named coordination requirement, satisfiable on either side, and absent from both today:**
+
+1. **Atrium-side** — make `reconcileStoredAttention` concurrency-safe: a per-room advisory lock around the read-reconcile-write, a status-predicated update that refuses to overwrite a resolved item with a stale `pending`, or a `resolvedAt`/version-guarded write. This is the cleaner fix and it also hardens the existing single-writer path against a future second writer.
+2. **Bridge-side** — the bridge worker and the interpretation worker share a per-room lock so their reconciliations serialize. Both are in-process atrium workers, so a shared advisory lock is *achievable* — but it must be *designed*, and it is not "just call the function". A lock the bridge takes and the interpreter does not is no lock.
+
+Either way it is a coordination guarantee, not a line of glue. This document authorizes neither; it names the requirement.
+
+**The window is still the worker's obligation.** Independently of the lock, the bridge must pass an appropriately bounded room window in `messages` — the same discipline `interpret.ts` applies with its `readContext` collar (`interpret.ts:546-549`), which folds a bounded forward tail rather than the whole future room so unrelated later conversation cannot silently reclassify a staged reading.
+
+**It is moot until P1 anyway.** While every bridge proposal resolves `quiet` (§12.1), `attention.ts:827` skips it regardless of who calls the reconciler — there is no `needs_you` item to persist, so there is nothing to race on. P2 becomes live only once P1 is solved and the proposal reaches `needs_you`. That ordering is why P1 remains the gating decision and P2 is a requirement that arrives with it, not before it.
 
 ---
 
@@ -468,11 +477,11 @@ Catch-up is **not** ordered; `room_seq` records arrival, not land order (§9.7).
 
 ---
 
-## 12. Preconditions atrium must build before this bridge is sound
+## 12. Preconditions before this bridge is sound
 
-**Two** preconditions, P1 and P3. Each is forced by code quoted below, each blocks the automatic `~ → ✓` loop, and **neither is solvable on the glance or bridge side without defeating the property the code exists to protect.** §4 is what exists until they are funded.
+**Two atrium migrations, P1 and P3, plus one coordination requirement, P2.** Each is forced by code quoted below, each blocks the automatic `~ → ✓` loop, and none is solvable on the glance or bridge side without defeating the property the code exists to protect. §4 is what exists until they are funded.
 
-Round 3 named a third — attention persistence — which round 4's code-verified review demoted to bridge-side work; it now lives at §7.3, not here. The numbering below keeps P1 and P3 by name to match the review record; there is no P2 in the atrium-precondition set.
+P1 (§12.1) and P3 (§12.2) require a change to atrium and are stated here. **P2 lives at §7.3** rather than here, because its mechanism is a bridge-worker step — but it carries a concurrency guarantee (`reconcileStoredAttention` reads outside its write transaction and upserts unconditionally, `attention-projection.ts:43`/`:88-96`) that neither repo provides today and that either side may supply. It is a genuine precondition; it is placed with the worker whose call exposes it. All three are moot until P1, which is the gating decision.
 
 ### §12.1 — P1 — A certification path for readings whose provenance is not room conversation
 
@@ -538,7 +547,7 @@ A third candidate round 3 floated — a receipts room with no interpreter instal
 3. **No new trust surface built on §6's say-so.** §6 specifies a contract and its structural properties; building the credential table, the verifier, the delivery consumer, or the `mintAgentSession` refusal is an atrium decision. §6.5 says so.
 4. **No relaxation of `commands.ts:1516`.** The socket path continues to refuse an agent staging a proposal.
 5. **No widening of `Proposer`.** `proposal.ts:19-21` stands; `common.ts:308-312`'s two questions remain unanswered.
-6. **No change to `claimWindow`, `laterRevision`, or the acceptance engine.** §12 names two preconditions and authorizes neither of them. Choosing among P1's and P3's options is atrium's.
+6. **No change to `claimWindow`, `laterRevision`, the acceptance engine, or `reconcileStoredAttention`.** §12 names two atrium migrations (P1, P3) and §7.3 names one coordination requirement (P2), and authorizes none of them. Choosing among P1's and P3's options, and between P2's two satisfactions, is the Phase-5 decision's to make.
 7. **No session for the bridge principal, ever.** §8.1's new row. `mintAgentSession` must refuse it.
 8. **No execution runtime.** `init.md:250-264`'s "do not initially build" list is untouched. This is Phase 4 precisely because it needs no repository access.
 9. **No certification authority for any machine.**
@@ -556,6 +565,7 @@ A third candidate round 3 floated — a receipts room with no interpreter instal
 
 - **Which P1 shape** — a proposer variant, or a "reported, not extracted" provenance kind (§12.1).
 - **Which P3 option** — author-kind filter, or full slice 2 (§12.2). The per-room-interpreter third option is verified absent and dropped.
+- **Which side satisfies P2** (§7.3) — atrium-side concurrency-hardening of `reconcileStoredAttention` (the cleaner fix, which also protects the existing single-writer path), or a bridge/interpreter shared per-room lock (achievable but must be designed on both workers, not one).
 - **Renderer fidelity** — nothing enforces that the prose sentence faithfully transcribes the envelope beside it. §9.3 makes the discrepancy *discoverable* (both are in the same message body) but not *detected*. Property-testing the render as a pure function of the envelope is a mitigation, not a guarantee.
 - **Whether a land receipt should be a `decision`** (§9.4) — least-bad among five, not natural.
 - **Message volume** — one message per land floods a busy room; a materiality bar makes the ledger silently partial, batching couples unrelated lands into one transaction.
@@ -572,8 +582,8 @@ A third candidate round 3 floated — a receipts room with no interpreter instal
 2. **`reduce.ts:567` derives `stagedBy` from the trusted append actor.** If it were caller-supplied, §8.2's honesty argument collapses. *Confirmed rounds 1–2.*
 3. **`proposal_sources` structurally requires an in-room `messages` row** — `schema.ts:1201-1206`. *Confirmed rounds 1–2.*
 4. **A window that ends at its citations is refused** — `escalation.ts:2107-2112` → `:1058` (`refer`) → `acceptance.ts:758-768` (`quiet`). If a bridge receipt could reach `needs_you` while citing only its own newest message, **P1 dissolves and §9 works as written.**
-5. **`reconcileStoredAttention` is exported and self-contained** — `attention-projection.ts:36-102`, signature `{db, state, roomId, messages, now}`; the caller supplies `state` (`interpret.ts:552`). This is what makes attention persistence a bridge-worker step (§7.3) rather than an atrium precondition. If it secretly depended on interpretation-worker-only context, it would revert to a precondition. *Confirmed round 4.*
+5. **`reconcileStoredAttention` reads outside its write transaction and upserts unconditionally** — the read is `attention-projection.ts:43`, the transaction opens at `:70`, and the `onConflictDoUpdate` `set` at `:88-96` carries no status predicate, version guard, or row lock. This is what makes P2 (§7.3) a real coordination requirement rather than "just call it": a second in-process writer can resurrect a dismissed item or clobber a peer resolution. If a lock, a version column, or a status-predicated update already guarded this write, P2 would dissolve into "just call it". *Confirmed round 5 (foreign-lineage cross-check).*
 6. **`claimWindow` has no author filter and `messages` has no author-kind column** — `interpret.ts:648-673`, `schema.ts:1016`. If either existed, P3 dissolves. *Confirmed round 4.*
-7. **`mintAgentSession` issues a real Better Auth session** — `principal.ts:197-227`, `:218`. If an agent session were already capability-restricted, §6 is over-built.
+7. **`mintAgentSession` issues a real Better Auth session** — `principal.ts:197-227`, `:220`. If an agent session were already capability-restricted, §6 is over-built.
 8. **`DecisionPayload` strips unknown keys** — `objects.ts:19-24`, a plain `z.object` with no `passthrough`. If payloads survived intact, §9.3 could put the envelope there instead of the message body.
 9. **`decision` never auto-accepts and reaches `needs_you` only at ≥θ_auto** — `policy.ts:128`; `acceptance.ts:871-879`, `:907-915`; `attention.ts:827`.
