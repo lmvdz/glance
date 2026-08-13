@@ -1,25 +1,20 @@
-export type AgentStatus = "starting" | "working" | "idle" | "input" | "error" | "stopped";
+// ── The wire-contract kernel (concern 08 slice 2) ────────────────────────────────────────────────
+// These are TYPE-ONLY re-exports of src/core-types.ts — the daemon's zero-import kernel — not
+// hand-maintained mirrors. Slice 1 proved the cross-tree type-only import shape on the event-kind
+// list (zero daemon modules in the browser bundle; types erase). A kernel change is now ONE edit;
+// the conformance file (tests/dto-conformance.test-d.ts) still gates the pairs, which are now
+// exact by construction (concern 24's conformance file gates the DOMAIN-DTO pairs on its own
+// branch; for these re-exported kernel types the alias itself is the guarantee — there is no
+// second declaration left to drift). The kernel stays a zero-import leaf BY CONTRACT (its module doc + the WorkLane
+// dependency flip this slice shipped), so the webapp's tsc program grows by exactly one file.
+export type { AgentStatus, IssueRef, PendingRequest, TranscriptEntry, TranscriptEvent, TranscriptFormat, TranscriptKind, TranscriptPending, TranscriptStatus, TranscriptTool } from "../../../src/core-types.ts";
+import type { AgentStatus, IssueRef, PendingRequest, TranscriptEntry, TranscriptEvent, TranscriptFormat, TranscriptTool } from "../../../src/core-types.ts";
 export type FeatureStage = "planned" | "issues-created" | "in-progress" | "review" | "diverged" | "landed" | "done";
 export type WorktreeProofState = "none" | "failed" | "stale" | "fresh";
 /** Mirrors backend `FeatureCategory` (src/types.ts) — the operator override on `FeatureDTO.category`.
  *  Absent ⇒ the client derives a bucket from title+planDir (task-model.ts), falling back to 'other'. */
 export type FeatureCategoryDTO = "frontend" | "devops" | "backend" | "mcp" | "database" | "other";
 
-
-export interface PendingRequest {
-  id: string;
-  source: "ui" | "tool";
-  kind: string;
-  title: string;
-  message?: string;
-  options?: string[];
-  placeholder?: string;
-  createdAt: number;
-  gateClass?: boolean;
-  /** Mirrors backend: recreated from an agent-host ring replay during the post-reattach settle
-   *  window — read by ghost-expiry only, never gates answerability. */
-  replayed?: true;
-}
 
 /** Mirrors backend `AgentReport` (src/types.ts) — a non-blocking "I'm unsure, here's a proposal"
  *  note. NOT a `PendingRequest`: it never blocks the agent or flips status to "input" (Epic 5 D2). */
@@ -64,27 +59,6 @@ export interface TransitionEntry {
   replayed?: true;
   /** Mirrors backend: globally-unique entry identity (uuid); absent on pre-seq persisted lines. */
   seq?: string;
-}
-
-export interface IssueRef {
-  id: string;
-  identifier?: string;
-  name: string;
-  state?: string;
-  priority?: "urgent" | "high" | "medium" | "low" | "none" | string;
-  url?: string;
-  projectId?: string;
-  blockedBy?: string[];
-  noAutoDispatch?: boolean;
-  /** Mirrors backend scope contract (src/core-types.ts IssueRef): repo-relative path prefixes. */
-  requires?: string[];
-  owns?: string[];
-  produces?: string[];
-  scopeSource?: "inferred" | "operator";
-  /** Authored spec body for dispatch context — UNTRUSTED ticket text. */
-  description?: string;
-  /** Work lane from a Plane lane: label (src/lane.ts WorkLane). */
-  lane?: "hotfix" | "feature" | "chore";
 }
 
 export interface ProjectDTO {
@@ -688,66 +662,6 @@ export interface AgentDTO {
   completionArmedAt?: number;
   /** The needs-you ladder's computed, viewer-agnostic priority state. */
   ladderPriority?: "error" | "pending-approval" | "awaiting-input" | "working" | "plan-ready" | "completed-unseen" | "idle";
-}
-
-export interface TranscriptTool {
-  callId?: string;
-  name: string;
-  args?: unknown;
-  argsText?: string;
-  partial?: unknown;
-  partialText?: string;
-  result?: unknown;
-  resultText?: string;
-  isError?: boolean;
-  durationMs?: number;
-}
-
-export type TranscriptFormat = "markdown" | "command" | "stage" | "plain";
-
-export interface TranscriptEvent {
-  /**
-   * Open event taxonomy for manager-authored proof facts.
-   * HAZARD: this is NOT `TranscriptEntry.kind`; entry.kind is the closed render/source axis,
-   * while event.kind is an open, feature-owned fact taxonomy.
-   */
-  kind: string;
-  /**
-   * Attesting authority, stamped daemon-side at the emit chokepoint — never client
-   * input. Absent on pre-provenance entries; reads as "manager" (the only issuer today).
-   */
-  issuer?: string;
-  payload: unknown;
-}
-
-
-export interface TranscriptPending {
-  requestId: string;
-  action: "created" | "answered" | "cancelled";
-}
-
-export interface TranscriptEntry {
-  id?: string;
-  seq?: number;
-  kind: "user" | "assistant" | "thinking" | "tool" | "system";
-  text: string;
-  ts: number;
-  clientTurnId?: string;
-  /**
-   * The user's bare typed text, when it differs from `text` (the full context-augmented
-   * message the agent actually received). UI renders this when present; `text` stays the
-   * durable audit/debug record.
-   */
-  displayText?: string;
-  status?: "running" | "ok" | "error" | "cancelled";
-  tool?: TranscriptTool;
-  format?: TranscriptFormat;
-  pending?: TranscriptPending;
-  /**
-   * Optional typed proof event. HAZARD: `TranscriptEntry.kind` and `event.kind` are
-   * different axes: closed transcript/source axis vs open manager-authored fact taxonomy.
-   */
-  event?: TranscriptEvent;
 }
 
 export interface Channel {

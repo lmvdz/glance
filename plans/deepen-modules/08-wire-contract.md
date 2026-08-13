@@ -1,5 +1,5 @@
 # One wire-contract module for daemon and webapp
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -39,3 +39,17 @@ precedent). Slice 1 (event kinds, PR #317) is complete and independently mergeab
 
 ## Provenance
 Whole-repo report candidate 3 (Strong).
+
+## Done (2026-08-11, round 3 iteration 7 — slice 2, PR #375)
+The shared-vs-generated decision is made and landed per-domain: the KERNEL is shared — dto.ts's
+hand-mirrored head cluster (AgentStatus, PendingRequest, IssueRef, the five transcript blocks)
+is now type-only re-exports of src/core-types.ts, which became a true ZERO-IMPORT leaf via the
+designed WorkLane dependency flip (unions moved in, lane.ts + types.ts re-export). The alias IS
+the guarantee — no second declaration left to drift; the re-export even fixed the callId
+optionality drift the mirror carried. The big domain DTOs STAY conformance-gated mirrors
+(deliberate divergences like TransitionEntry.reason cannot be expressed by re-export; concern
+24's file is their compiler edge), and payload schemas have their runtime test. Codex: kernel
+proven zero-import, vite bundle graph ZERO daemon modules under the real config, all three
+semantic widenings have zero production reads; 2 doc-accuracy Lows fixed (types.ts now honors
+its own barrel promise). Grok narration-only x2 (gap row). Gates: check 0, vite green, root
+5332/2-inherited, webapp 2002/0.
