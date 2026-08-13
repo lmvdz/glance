@@ -79,6 +79,13 @@ function parseIndexRow(line: string): LandReceiptIndexRow | null {
 		forced: o.forced === true,
 		gateStatus: (typeof o.gateStatus === "string" ? o.gateStatus : "failed") as LandReceiptIndexRow["gateStatus"],
 		...(precision ? { precision } : {}),
+		// The validator verdict (glance#391 round 3): only a `"pass"` counts as measured. An unknown/
+		// missing verdict is preserved as absent, and `isMeasuredLand` fails closed on it.
+		...(typeof o.verdict === "string" ? { verdict: o.verdict as LandReceiptIndexRow["verdict"] } : {}),
+		...(o.criteriaSource === "pr-body" || o.criteriaSource === "call" ? { criteriaSource: o.criteriaSource } : {}),
+		// Stable land id for read-dedupe (round 4 M-1). Back-fill from branch+commit for older rows
+		// written before the field existed, so dedupe is uniform across the file's history.
+		...(typeof o.landId === "string" ? { landId: o.landId } : typeof o.commit === "string" ? { landId: `${o.branch as string}\0${o.commit}` } : {}),
 	};
 }
 
@@ -95,25 +102,38 @@ export async function readLandReceiptIndex(stateDir: string): Promise<LandReceip
 	}
 	const rows: LandReceiptIndexRow[] = [];
 	let malformed = 0;
+	// Dedupe on the stable land id (round 4 M-1): a double-append — the retry-after-a-late-EIO case,
+	// where the line persisted but the write reported failure — must not double-count. First row for a
+	// given landId wins; a not-landed row (no landId) is always kept (nothing to collide on).
+	const seenLandIds = new Set<string>();
 	for (const line of text.split("\n")) {
 		const t = line.trim();
 		if (!t) continue;
 		const row = parseIndexRow(t);
-		if (row) rows.push(row);
-		else malformed++;
+		if (!row) {
+			malformed++;
+			continue;
+		}
+		if (row.landId) {
+			if (seenLandIds.has(row.landId)) continue; // duplicate of a land already recorded — drop
+			seenLandIds.add(row.landId);
+		}
+		rows.push(row);
 	}
 	return { rows, malformed };
 }
 
-/** True when a row is a real merge with a *trustworthy* measured reviewer-precision stamp — the
- *  destination's evidence. Requires: `landed`, NOT `forced` (a human override that bypassed the proof
- *  gate is not the rail deciding safely — grok #361 / the row type's own contract), a `precision`
- *  with `n > 0`, and neither the `corrupt` nor `unreadable` ledger-quality flag set (both are forced
- *  to `n === 0` upstream, but a hand-built/wire row could carry `n > 0` alongside them — exclude
+/** True when a row is a real merge a judge EVALUATED to `pass` with a *trustworthy* measured
+ *  reviewer-precision stamp — the destination's evidence. Requires: `landed`; NOT `forced` (a human
+ *  override that bypassed the proof gate is not the rail deciding safely — grok #361); the validator
+ *  `verdict === "pass"` (glance#391 round 3, C-3 — an `abstain` IS precision-stamped, so `n > 0`
+ *  alone would wrongly count it; a missing/unknown verdict fails closed); and a `precision` with
+ *  `n > 0` and neither the `corrupt` nor `unreadable` ledger-quality flag set (both are forced to
+ *  `n === 0` upstream, but a hand-built/wire row could carry `n > 0` alongside them — exclude
  *  explicitly, defence in depth). */
 export function isMeasuredLand(row: LandReceiptIndexRow): boolean {
 	const p = row.precision;
-	return row.landed === true && row.forced !== true && p != null && p.n > 0 && p.corrupt !== true && p.unreadable == null;
+	return row.landed === true && row.forced !== true && row.verdict === "pass" && p != null && p.n > 0 && p.corrupt !== true && p.unreadable == null;
 }
 
 const bump = (acc: Record<string, number>, day: string): void => {

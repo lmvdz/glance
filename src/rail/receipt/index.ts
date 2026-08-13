@@ -7,4 +7,4 @@
 export type { LandReceipt, LandReceiptGate, LandReceiptCost, GateStatus, PanelVerdict, LandReceiptIndexRow, LandReceiptPrecision } from "./types.ts";
 export { renderReceiptHtml } from "./render-html.ts";
 export { renderReceiptComment, mdEsc, type CommentOptions } from "./render-comment.ts";
-export { classifyLand, writeLandReceipt, postReceiptComment, landReceiptDir, landReceiptFilename, landReceiptIndexRow, landReceiptIndexPath, LAND_RECEIPT_INDEX_FILE } from "./write.ts";
+export { classifyLand, writeLandReceipt, appendLandReceiptIndexRow, postReceiptComment, receiptCommentOptions, landReceiptDir, landReceiptFilename, landReceiptIndexRow, landReceiptIndexPath, LAND_RECEIPT_INDEX_FILE } from "./write.ts";

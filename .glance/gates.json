@@ -1,0 +1,39 @@
+{
+	"_readme": "glance as TENANT ZERO (glance#393). This file is REGISTRATION INPUT, not the gate. At land time the validator consults only the glance-side per-org record (src/tenant-gate-registry.ts); a human imports this file once and approves it. A gate contract living in the repo the unit is editing would be a gate the unit can edit. See src/tenant-gates.ts's authority note.",
+	"version": 1,
+	"repo": ".",
+	"policy": {
+		"sandboxStrict": true
+	},
+	"gates": [
+		{
+			"name": "check",
+			"command": "bun run check",
+			"timeoutMs": 900000,
+			"expects": {
+				"exit": 0,
+				"parser": "raw"
+			}
+		},
+		{
+			"name": "root-suite",
+			"command": "bun test",
+			"timeoutMs": 2400000,
+			"expects": {
+				"exit": 0,
+				"parser": "bun-test",
+				"minTests": 5000
+			}
+		},
+		{
+			"name": "webapp-suite",
+			"command": "cd webapp && bun test",
+			"timeoutMs": 900000,
+			"expects": {
+				"exit": 0,
+				"parser": "bun-test",
+				"minTests": 1800
+			}
+		}
+	]
+}

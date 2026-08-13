@@ -11,9 +11,18 @@
  *   1. repo match   — `receipt.repo` names the SAME repo as the PR being checked (case-insensitive:
  *                      GitHub itself routes owner/repo case-insensitively, so this can't be defeated
  *                      by a casing mismatch, but a receipt for a DIFFERENT repo is rejected outright).
- *   2. SHA match     — `receipt.commit === pr.headSha`: the receipt certifies the PR's CURRENT head,
- *                      never some other commit (a different PR, an earlier push on the same PR, or a
- *                      replayed/copied receipt file).
+ *   2. SHA match     — the receipt certifies the PR's CURRENT head, never some other commit (a
+ *                      different PR, an earlier push on the same PR, or a replayed/copied receipt
+ *                      file). A real `receipt.commit` is REQUIRED (a landed receipt with none is
+ *                      rejected outright — `headCommit` never substitutes for the landed commit); the
+ *                      HEAD is then matched against `receipt.headCommit ?? receipt.commit` (glance#392 G8):
+ *                      the wedge is a PRE-MERGE required check running on the PR's pre-merge head, but
+ *                      a rail receipt's `commit` is the POST-merge merge commit — so it could NEVER
+ *                      green pre-merge. A rail receipt now also carries `headCommit`, the exact
+ *                      pre-merge tip the gate graded; when present it is the SHA that must equal the
+ *                      PR head. An agent/post-merge receipt with no `headCommit` keeps the old
+ *                      `commit`-match semantics untouched. Either way a receipt for the WRONG commit
+ *                      still fails — the check is tightened for the pre-merge case, never loosened.
  *   3. gate outcome  — `receipt.landed === true`, `receipt.gate.status` is a PROVEN outcome
  *                      (`"green"` or `"red-baseline"` — see `GateStatus`'s own doc for why
  *                      red-baseline still counts: the CHANGE introduced no new failures, even though
@@ -53,13 +62,24 @@ export function verifyReceiptForPr(receipt: LandReceipt, owner: string, repo: st
 		return { ok: false, reason: "repo-mismatch", detail: `receipt is for "${receipt.repo}", this check is for "${owner}/${repo}"` };
 	}
 
-	const receiptSha = receipt.commit?.toLowerCase();
+	// A landed receipt MUST identify the commit that landed — `headCommit` NEVER substitutes for that
+	// (glance#392, codex gauntlet HIGH): `headCommit ?? commit` alone would green a receipt with
+	// `commit:undefined, landed:true, headCommit === PR head` — a receipt asserting a land with no merge
+	// commit, which the pre-B3 gate rejected as "nothing merged". Require a real `commit` first, THEN
+	// match the PR head against the gated PRE-merge head (`headCommit`) when present — a rail receipt's
+	// `commit` is the POST-merge merge commit, so a pre-merge check must match `headCommit`; an
+	// agent/post-merge receipt with no `headCommit` keeps matching on `commit`. Either way, a receipt
+	// with no landed commit can never verify.
+	if (!receipt.commit) {
+		return { ok: false, reason: "sha-mismatch", detail: "receipt has no landed commit (nothing merged)" };
+	}
+	const certifiedSha = (receipt.headCommit ?? receipt.commit).toLowerCase();
 	const expectedSha = headSha.toLowerCase();
-	if (!receiptSha || receiptSha !== expectedSha) {
+	if (certifiedSha !== expectedSha) {
 		return {
 			ok: false,
 			reason: "sha-mismatch",
-			detail: receiptSha ? `receipt certifies commit ${receipt.commit}, but the PR's current head is ${headSha}` : "receipt has no landed commit (nothing merged)",
+			detail: `receipt certifies ${receipt.headCommit ? "gated head" : "commit"} ${receipt.headCommit ?? receipt.commit}, but the PR's current head is ${headSha}`,
 		};
 	}
 

@@ -32,6 +32,8 @@ import { insertLedgerRow } from "../src/meta-ledger.ts";
 import { resolveStateDir } from "../src/state-dir.ts";
 import { normalizeGitUrl } from "../src/repo-identity.ts";
 import { readLandReceiptIndex, landMetricsWindow, utcDayOf } from "../src/rail/land-metrics.ts";
+import { journalRowsForWindow, unconfirmedSelfLands, reconcileUnconfirmedSelfLands, type QueuedPrReader } from "../src/rail/self-land/journal.ts";
+import { ghJson } from "../src/gh.ts";
 
 const { flags } = parseArgs(process.argv.slice(2));
 const stateDir = typeof flags["state-dir"] === "string" ? path.resolve(flags["state-dir"]) : resolveStateDir();
@@ -71,6 +73,60 @@ try {
 } catch (err) {
 	fail(`cannot read the land-receipt index under ${stateDir} (${err instanceof Error ? err.message : String(err)}) — no row appended; the index is unmeasurable, not empty`);
 }
+// glance#392 item 5 — reconcile UNCONFIRMED self-lands against GitHub BEFORE folding. A queued PR (a
+// merge-queue enqueue, or an unreadable post-merge confirm after a 0-exit merge — item 4) that has
+// since MERGED at the gated head is promoted to `finalized` here, so the fold below counts it as the
+// MEASURED land it is instead of leaving it an eternal "awaiting confirmation" floor. Runs by default;
+// `--no-reconcile` skips it, and `--dry-run` never mutates the journal (preview only). A gh/network
+// fault leaves an entry PENDING (never aborted) — the undercount direction stays guarded. Non-fatal: a
+// reconcile failure never blocks the honest count the drain exists to produce.
+let reconcileNote = "";
+const doReconcile = !flags["dry-run"] && !flags["no-reconcile"];
+if (doReconcile) {
+	const reader: QueuedPrReader = async (e) => {
+		const target = e.prNumber && e.prNumber > 0 ? String(e.prNumber) : e.branch;
+		const j = await ghJson<{ state?: unknown; headRefOid?: unknown; mergeCommit?: unknown; baseRefName?: unknown; mergedAt?: unknown }>(["pr", "view", target, "--repo", e.repo, "--json", "state,headRefOid,mergeCommit,baseRefName,mergedAt"], process.cwd());
+		if (!j || typeof j !== "object" || typeof j.state !== "string") return undefined;
+		const mc = j.mergeCommit && typeof j.mergeCommit === "object" ? (j.mergeCommit as { oid?: unknown }).oid : undefined;
+		const mergedMs = typeof j.mergedAt === "string" ? Date.parse(j.mergedAt) : undefined;
+		return {
+			state: j.state,
+			headOid: typeof j.headRefOid === "string" ? j.headRefOid : undefined,
+			mergeCommit: typeof mc === "string" ? mc : undefined,
+			baseRef: typeof j.baseRefName === "string" ? j.baseRefName : undefined,
+			mergedAt: mergedMs !== undefined && Number.isFinite(mergedMs) ? mergedMs : undefined,
+		};
+	};
+	try {
+		const outcomes = await reconcileUnconfirmedSelfLands(stateDir, reader);
+		const folds = outcomes.filter((o) => o.action === "folded");
+		const foldedMeasured = folds.filter((o) => o.measured).length;
+		const aborted = outcomes.filter((o) => o.action === "aborted").length;
+		const stillPending = outcomes.filter((o) => o.action === "pending" || o.action === "unreadable").length;
+		for (const o of outcomes) console.error(`reconcile: ${o.action} — ${o.detail}`);
+		if (outcomes.length) reconcileNote = `; reconciled ${outcomes.length} unconfirmed (${folds.length} folded [${foldedMeasured} measured], ${aborted} aborted, ${stillPending} still pending)`;
+	} catch (err) {
+		console.error(`append-selfland-drain: reconcile step failed (non-fatal, count proceeds from the index+journal as-is): ${String(err)}`);
+	}
+}
+
+// H-3 (glance#391 round 3): fold in FINALIZED self-land journal rows whose index-append faulted after
+// a confirmed merge — so a receipt-write failure can never hide a merged measured land from the window.
+// Deduped against the index by (branch, commit); a land already in the index is not double-counted.
+// FAIL CLOSED on a journal read error (round 4 C-3): an unreadable journal is unmeasurable, never
+// silently "no fold" — otherwise a disk fault would hide exactly the lands the journal exists to save.
+let unconfirmed = 0;
+try {
+	const folded = await journalRowsForWindow(stateDir, read!.rows);
+	if (folded.length) read = { rows: [...read!.rows, ...folded], malformed: read!.malformed };
+	// Scope the "awaiting confirmation" floor to --repo when given (grok/codex gauntlet): the journal
+	// spans every repo sharing the state dir, so an unfiltered count would let a stale queued land from
+	// ANOTHER repo inflate this repo's floor. Unfiltered only when the row itself is unfiltered.
+	const allUnconfirmed = await unconfirmedSelfLands(stateDir);
+	unconfirmed = (repo ? allUnconfirmed.filter((e) => e.repo === repo) : allUnconfirmed).length;
+} catch (err) {
+	fail(`cannot read the self-land journal under ${stateDir} (${err instanceof Error ? err.message : String(err)}) — the measured-land fallback is unreadable; the count is unmeasurable, not empty`);
+}
 
 // The window ends "now" in UTC. Date.now() is intentional here (a CLI, not a resume-safe workflow
 // script) and only sets the window's upper bound + the row's date stamp.
@@ -85,7 +141,10 @@ const measuredClause = w.measured > 0
 // Honest scope label: only a repo-filtered count is "self-lands"; an unfiltered count spans every repo
 // sharing this state dir and must say so (grok #361 HIGH — never claim "glance's own PRs" unfiltered).
 const scope = repo ? `rail self-lands (${repo})` : `rail lands (ALL repos in this state dir — not self-filtered; pass --repo to scope)`;
-const row = `- ${utcDayOf(now)} — ${scope} (dogfood #339): last ${days}d ${w.lands} land(s) through the rail, ${measuredClause}; ${w.unmeasured} unmeasured${flaggedClause}${floor}.`;
+// Round 4 H-2/C-3: surface self-lands still awaiting confirmation (pending after a crash, or enqueued
+// in a merge queue). They are NOT counted as measured and NOT aborted — a floor the operator can act on.
+const unconfirmedClause = unconfirmed > 0 ? `; ${unconfirmed} awaiting confirmation (pending/merge-queued — reconcile before the window closes)` : "";
+const row = `- ${utcDayOf(now)} — ${scope} (dogfood #339): last ${days}d ${w.lands} land(s) through the rail, ${measuredClause}; ${w.unmeasured} unmeasured${flaggedClause}${unconfirmedClause}${reconcileNote}${floor}.`;
 
 // 2) Insert into the ledger's `## Ledger` section (byte-identical everywhere else). insertLedgerRow
 // throws if the section is absent — we do NOT auto-create it, so the append target is always a file a

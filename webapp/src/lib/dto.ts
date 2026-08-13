@@ -149,6 +149,9 @@ export interface ValidationRecordDTO {
    *  excerpt budget. Absent ⇒ nothing was oversized (the common case). Type hygiene only — not rendered
    *  anywhere in the webapp yet. */
   gateLogPaths?: string[];
+  /** glance#393: hash of the TenantGateManifest this land was gated by — the receipt states WHICH
+   *  gate contract it passed. Absent ⇒ the repo has no registered manifest (detection gated it). */
+  manifestHash?: string;
   ranAt: number;
 }
 

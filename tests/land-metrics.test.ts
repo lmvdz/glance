@@ -48,9 +48,11 @@ function receipt(over: Partial<LandReceipt> = {}): LandReceipt {
 	};
 }
 
-/** A bare index row (bypasses the receipt shape) for the parser/counter unit tests. */
+/** A bare index row (bypasses the receipt shape) for the parser/counter unit tests. A measured row
+ *  now requires `verdict:"pass"` (glance#391 round 3, C-3) — the base carries it; the unmeasured-case
+ *  tests override precision/landed/forced, never the verdict. */
 function row(over: Partial<LandReceiptIndexRow> = {}): LandReceiptIndexRow {
-	return { at: DAY("2026-08-04"), repo: "lmvdz/glance", branch: "rail/x", landed: true, forced: false, gateStatus: "green", precision: { lineage: "codex", n: 52, survived: 39 }, ...over };
+	return { at: DAY("2026-08-04"), repo: "lmvdz/glance", branch: "rail/x", landed: true, forced: false, gateStatus: "green", verdict: "pass", precision: { lineage: "codex", n: 52, survived: 39 }, ...over };
 }
 
 describe("landReceiptIndexRow (the pure builder)", () => {

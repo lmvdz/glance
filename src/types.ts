@@ -317,6 +317,11 @@ export interface ValidationRecord {
 	 *  excerpt budget — the judge prompt itself only saw a diff-aware/head+tail excerpt with the same
 	 *  pointer appended. Absent ⇒ nothing was oversized (the common case). */
 	gateLogPaths?: string[];
+	/** glance#393 — the hash of the TenantGateManifest this land was gated by (`src/tenant-gates.ts`'s
+	 *  `manifestHash`). A receipt that says "passed" without saying WHICH contract it passed is not a
+	 *  receipt: two lands of the same repo under a contract that was edited in between are otherwise
+	 *  indistinguishable. Absent ⇒ the repo has no registered manifest and was gated by detection. */
+	manifestHash?: string;
 	ranAt: number;
 }
 
