@@ -6,7 +6,7 @@
 
 **Authorities:** the glance#208 thread comment (2026-08-12); atrium `init.md` Phase 4 (`init.md:513-526`); atrium `plans/room-entity-capabilities/ARCHITECTURE.md` (2026-08-04); glance#388 and its round-1 and round-2 gauntlet receipts.
 
-**Trees read:** glance at `campaign/phase5-bridge`; atrium at `699842e`, read-only.
+**Trees read:** glance at `campaign/phase5-bridge`; atrium at `699842e`, read-only. Anchors touched in round 4 were re-verified against atrium HEAD `240b26e` — one commit past the `699842e` baseline (a docs-only lint-comment fix, no code change), and every touched anchor holds unchanged at both.
 
 **Reopen if wrong.** Every anchor was re-derived from `699842e` immediately before writing. Round 1's anchors drifted per-file and were rebuilt in round 2; round 2's spot-checks all matched.
 
@@ -14,31 +14,33 @@
 
 ## 0. The finding this document now leads with
 
-Two rounds of review converged on something larger than a defect list. **Atrium's acceptance engine structurally resists the shape this bridge assumed** — "stage a reading into the room and let the ledger surface it" — and it resists at three independent points, none of which is a bug.
+Three rounds of review converged on something larger than a defect list. **Atrium's acceptance engine structurally resists the shape this bridge assumed** — "stage a reading into the room and let the ledger surface it." A blind, code-verified precondition review (round 4) reduced the resistance to **two** genuine atrium preconditions, neither of which is a bug.
 
 The engine is built on one premise: *a machine reading is an extraction from messages people wrote, and it is certifiable to the degree the surrounding conversation corroborates it.* A land receipt is not that. It is a machine **reporting on the outside world**, and it arrives as the newest thing in the room with nothing after it and nothing before it that it was read out of. Every gate that makes machine readings safe is measuring a property a land receipt cannot have.
 
-That is not three patches. It is the code telling the truth about what Phase 5 would have to fund. So this document now does two jobs:
+That is not a patch list. It is the code telling the truth about what Phase 5 would have to fund. So this document now does two jobs:
 
 1. **§4 — what ships today**, with zero atrium changes: receipts as room messages, and a human-staged path into the ledger. This is real and it is degraded, and §4.3 says exactly how.
-2. **§12 — what atrium must build** before the automatic `~ → ✓` loop is sound, each precondition quoting the code that forces it.
+2. **§12 — what atrium must build** before the automatic `~ → ✓` loop is sound: **two** preconditions (P1 and P3), each quoting the code that forces it.
 
 Everything between is the bridge design that becomes correct once §12 is funded.
 
-### Disposition of every round-2 blocker
+### Disposition of every blocker raised across four rounds
 
 | blocker | disposition | where |
 |---|---|---|
 | Trust seam is unlocked (`mintAgentSession` issues a real session) | **SOLVED** | §6 |
 | Full envelope stripped by `DecisionPayload`'s zod | **SOLVED** | §9.3 |
-| Certifiable window — receipt is always the newest message | **NAMED — P1** | §12.1 |
-| Attention persistence only via the interpreter | **NAMED — P2** | §12.2 |
-| Interpretation exclusion is policy, no author filter exists | **NAMED — P3** | §12.3 |
+| Certifiable window — receipt is always the newest message | **NAMED — P1 (atrium)** | §12.1 |
+| Interpretation exclusion is policy, no author filter exists | **NAMED — P3 (atrium)** | §12.2 |
+| Attention persistence only via the interpreter | **SOLVED — bridge-side** | §7.3 |
 | `proposal.id` not tenant/room scoped against a global PK | **SOLVED** | §9.5 |
 | Content hash is content-identity, not occurrence-identity | **SOLVED** | §9.5 |
 | §8.5 outbox does not survive the fire-and-forget crash window | **SOLVED** | §10.5 |
 | Credential revocation not re-checked at append | **SOLVED** | §6.4 |
 | Staging insert not transactionally tied to the enqueue | **SOLVED** | §7.2 |
+
+**Two atrium preconditions, not three.** Round 3 named three; round 4's code-verified review demoted attention-persistence to bridge-side work (`reconcileStoredAttention` is exported and self-contained — §7.3), leaving **P1 (§12.1)** and **P3 (§12.2)** as the genuine atrium asks. Both are confirmed against code; the demoted one is now a step of the bridge worker.
 
 **Vindicated from round 1:** the `0.9` / `never_auto_accepts` confidence choice. Round 1's remedy — confidence inside `[θ_min, θ_auto)` — was refuted against `acceptance.ts:866-880`, which returns `quiet` for every type in that band, "decisions included". That remains the design (§9.4), though P1 means it is not yet reachable.
 
@@ -253,6 +255,19 @@ Round 2 found the staging insert untied to the enqueue. The fix is the pattern a
 
 So the delivery-verification handler inserts the staging row and enqueues the bridge job **in one transaction**, through `fromDrizzle(tx, sql)`. Without it there is a window in which a delivery is durable and nothing will ever read it — the identical defect `queue.ts:20-28` records having already been caught once.
 
+### 7.3 The worker persists its own attention — bridge-side, not an atrium precondition
+
+Round 3 named this an atrium precondition (P2), on the worry that a proposal's attention item is persisted only by the interpretation worker's Settle step (`interpret.ts:550`), which P3's exclusion (§12.2) disables. **Round 4's code-verified review resolved it the way §12.2 hypothesized: it is bridge-side work, and this is where it lives.**
+
+`reconcileStoredAttention` (`apps/server/src/attention-projection.ts:36-102`) is **exported and self-contained.** Its signature is `{ db, state, roomId, messages, now }` (`:36-42`) — it does not call `coreState()` itself; the caller supplies `state`, as the interpretation worker does at `interpret.ts:552` (`state: deps.ledger.coreState()`). The bridge worker holds `deps.ledger` and `deps.db`, so after its `appendBatch` it calls `reconcileStoredAttention` identically, with its own room and its own `coreState()`. This is a step of the worker, not a missing atrium capability.
+
+Two things make it safe rather than merely possible:
+
+- **Idempotent persist.** The write is `onConflictDoUpdate` keyed on `(userId, subjectKind, subjectId, class)`, so a bridge persist and a later interpretation pass over the same room converge on one row rather than double-counting. The double-count worry round 3 raised is unfounded against the conflict key.
+- **The window is the worker's obligation.** The one real duty is passing an appropriately bounded room window in `messages` — the same discipline `interpret.ts` applies with its `readContext` collar (`interpret.ts:546-549`), which folds a bounded forward tail rather than the whole future room so that unrelated later conversation cannot silently reclassify a staged reading. The bridge worker owes the same bound. This is a bridge-side test surface, not an atrium migration.
+
+**It is moot until P1 anyway.** While every bridge proposal resolves `quiet` (§12.1), `attention.ts:827` skips it regardless of who calls the reconciler — there is no `needs_you` item to persist. This step only becomes live once P1 is solved and the proposal reaches `needs_you`; it is specified here so that when P1 lands, the bridge worker is already complete rather than acquiring a new atrium dependency.
+
 ---
 
 ## 8. The durable machine principal
@@ -445,7 +460,7 @@ Catch-up is **not** ordered; `room_seq` records arrival, not land order (§9.7).
 > **`:256`** — "3. **Human authority completion:** specify and enforce which human may certify third-party claims, commitments, assignments, and grant agents."
 > **`:261`** — "Each slice has an observable boundary and can ship or be rejected independently. No later slice is smuggled into the typed-reference schema."
 
-**Slice 2** is subsumed by P3 (§12.3) — the same migration, reached from a different direction.
+**Slice 2** is subsumed by P3 (§12.2) — the same migration, reached from a different direction.
 
 **Slice 3 is an inherited gap this bridge widens.** `ARCHITECTURE.md:234` asks "Which human may certify a third-party claim, commitment, or assignment? This must resolve current 'any human' gaps rather than inherit them." Today any room member may accept a bridge decision: `selfStagedReadingRefusal`'s guard (`authority.ts:537`, `:546`) returns null when the stager is not the accepting human, and the stager is the agent principal. So anyone may `✓` a land they did not review. The bridge does not create the gap; it makes it load-bearing, because a land receipt is exactly what a passer-by clears to empty a Needs-you badge.
 
@@ -455,9 +470,11 @@ Catch-up is **not** ordered; `room_seq` records arrival, not land order (§9.7).
 
 ## 12. Preconditions atrium must build before this bridge is sound
 
-Each of these is forced by code quoted below, each blocks the automatic `~ → ✓` loop, and **none is solvable on the glance or bridge side without defeating the property the code exists to protect.** §4 is what exists until they are funded.
+**Two** preconditions, P1 and P3. Each is forced by code quoted below, each blocks the automatic `~ → ✓` loop, and **neither is solvable on the glance or bridge side without defeating the property the code exists to protect.** §4 is what exists until they are funded.
 
-### P1 — A certification path for readings whose provenance is not room conversation
+Round 3 named a third — attention persistence — which round 4's code-verified review demoted to bridge-side work; it now lives at §7.3, not here. The numbering below keeps P1 and P3 by name to match the review record; there is no P2 in the atrium-precondition set.
+
+### §12.1 — P1 — A certification path for readings whose provenance is not room conversation
 
 **The blocker.** The bridge's receipt message is necessarily the newest message in the room, and the proposal cites it. `escalation.ts:2107-2112`:
 
@@ -488,17 +505,7 @@ That was resolved by widening the window to carry the cited messages plus the ro
 
 **This is the Phase-5 decision input.** The question is not "how do we get glance receipts into the ledger" — it is "does the ledger admit machine testimony about the outside world, and on what warrant."
 
-### P2 — Attention persistence independent of the interpretation worker
-
-**The blocker.** `reconcileStoredAttention` (`apps/server/src/attention-projection.ts:36`) has exactly **one** non-test call site in the tree: `apps/server/src/jobs/interpret.ts:550`, inside the interpretation worker's Settle step. So a proposal's attention item is persisted only when the interpretation worker runs over its room window.
-
-P3's exclusion — which keeps the interpreter from reading bridge messages — therefore removes the only mechanism that would persist the bridge proposal's attention item. The two required fixes are in direct tension, which is why this is named rather than patched.
-
-**Least-certain of the three, and flagged as such.** `reconcileStoredAttention` is exported, and the bridge worker (§7) is an in-process atrium worker that could call it directly after its `appendBatch` with its own room window. If that is sufficient, P2 is bridge-side work rather than an atrium precondition, and this entry collapses into §7. Two things I could not establish: whether calling it outside the interpretation worker's claimed-window context is safe (it reads `deps.ledger.coreState()` and a `readContext` window computed from `claimed`, `interpret.ts:546-549`), and whether doing so double-counts against a later interpretation pass over the same room. **A reviewer should resolve this one first** — it is the precondition most likely to be downgraded.
-
-Note also that P2 is downstream of P1: while every bridge proposal resolves `quiet`, `attention.ts:827` skips it regardless, so no attention item exists to persist. P2 only becomes live once P1 is solved.
-
-### P3 — A structural interpretation exclusion for machine-authored messages
+### §12.2 — P3 — A structural interpretation exclusion for machine-authored messages
 
 **The blocker.** `claimWindow` (`interpret.ts:648-673`) drains:
 
@@ -511,13 +518,14 @@ ORDER BY m.seq ASC LIMIT ${config.maxWindowMessages}
 
 **No author filter and no author-kind filter exist.** And `projections.ts:212` calls `onMessagePosted` unconditionally for every `message_posted` event, in the same transaction, which is what enqueues the pass.
 
-So the interpreter reads the bridge's receipt messages and stages *its own* readings of them — and `claim` and `open_question` auto-accept at θ (`policy.ts:130-131`; `interpret.ts:468-480`). Accepted ledger state derived from a machine's message with no human in the path, arriving by a route the bridge does not control and cannot close from its own side, because **there is no filter to build the exclusion on.**
+So the interpreter reads the bridge's receipt messages and stages *its own* readings of them — and `claim` and `open_question` auto-accept at θ (`policy.ts:130-131`; `interpret.ts:468-480`). Accepted ledger state derived from a machine's message with no human in the path, arriving by a route the bridge does not control and cannot close from its own side, because **there is no filter to build the exclusion on.** Confirmed at HEAD: `claimWindow`'s `WHERE` is `room_id` plus the pending predicate and nothing else (`interpret.ts:648-673`), and `messages` has no author-kind column at all — only `authorId` (`schema.ts:1016`) — so an exclusion cannot be expressed without a change to atrium.
 
-**What atrium must build**, one of:
+**What atrium must build**, one of two:
 
-1. An author-kind filter in `claimWindow` — join `users`, exclude `principal_kind = 'agent'`. Narrow and structural. Its cost is a product decision well beyond this bridge: agents become permanently unreadable to interpretation.
-2. Per-room interpreter installation, so a receipts room has none. `ARCHITECTURE.md:40` describes an interpreter as installed rather than joined, which *suggests* this exists; **I did not verify it in code and a reviewer should.** Cheapest if true.
-3. `ARCHITECTURE.md:255`'s slice 2 in full — machine output never auto-accepts — after which the interpreter reading a bridge message produces a `~` a human must accept, which is noisy rather than unsound.
+1. An author-kind filter in `claimWindow` — join `users` and exclude `principal_kind = 'agent'`. Narrow and structural, and it genuinely needs the join because `messages` carries no kind of its own. Its cost is a product decision well beyond this bridge: agents become permanently unreadable to interpretation.
+2. `ARCHITECTURE.md:255`'s slice 2 in full — machine output never auto-accepts — after which the interpreter reading a bridge message produces a `~` a human must accept, which is noisy rather than unsound.
+
+A third candidate round 3 floated — a receipts room with no interpreter installed — is **verified absent and dropped.** There is no per-room interpreter installation in the tree (no `installInterpreter`, no per-room registry), and `ARCHITECTURE.md:40` says the opposite of what round 3 read into it: "processes may pool work for many rooms; 'one worker process per room' is not an identity or consistency requirement" — a pooled shared service, not a per-room opt-out. So P3 reduces to the two real migrations above, which strengthens rather than weakens it.
 
 **This is the same migration `ARCHITECTURE.md:213` already named** as a prerequisite "before agents exist". It is unshipped.
 
@@ -530,7 +538,7 @@ So the interpreter reads the bridge's receipt messages and stages *its own* read
 3. **No new trust surface built on §6's say-so.** §6 specifies a contract and its structural properties; building the credential table, the verifier, the delivery consumer, or the `mintAgentSession` refusal is an atrium decision. §6.5 says so.
 4. **No relaxation of `commands.ts:1516`.** The socket path continues to refuse an agent staging a proposal.
 5. **No widening of `Proposer`.** `proposal.ts:19-21` stands; `common.ts:308-312`'s two questions remain unanswered.
-6. **No change to `claimWindow`, `laterRevision`, or the acceptance engine.** §12 names three preconditions and authorizes none of them. Choosing among P1's and P3's options is atrium's.
+6. **No change to `claimWindow`, `laterRevision`, or the acceptance engine.** §12 names two preconditions and authorizes neither of them. Choosing among P1's and P3's options is atrium's.
 7. **No session for the bridge principal, ever.** §8.1's new row. `mintAgentSession` must refuse it.
 8. **No execution runtime.** `init.md:250-264`'s "do not initially build" list is untouched. This is Phase 4 precisely because it needs no repository access.
 9. **No certification authority for any machine.**
@@ -546,10 +554,8 @@ So the interpreter reads the bridge's receipt messages and stages *its own* read
 
 ## 14. Unresolved
 
-- **Which P2 answer is right** — bridge-side call or atrium-side decoupling (§12.2). Most likely to be downgraded.
-- **Whether per-room interpreter installation exists** (§12.3 option 2) — unverified in code.
 - **Which P1 shape** — a proposer variant, or a "reported, not extracted" provenance kind (§12.1).
-- **Which P3 option** — author-kind filter, uninterpreted room, or full slice 2.
+- **Which P3 option** — author-kind filter, or full slice 2 (§12.2). The per-room-interpreter third option is verified absent and dropped.
 - **Renderer fidelity** — nothing enforces that the prose sentence faithfully transcribes the envelope beside it. §9.3 makes the discrepancy *discoverable* (both are in the same message body) but not *detected*. Property-testing the render as a pure function of the envelope is a mitigation, not a guarantee.
 - **Whether a land receipt should be a `decision`** (§9.4) — least-bad among five, not natural.
 - **Message volume** — one message per land floods a busy room; a materiality bar makes the ledger silently partial, batching couples unrelated lands into one transaction.
@@ -566,8 +572,8 @@ So the interpreter reads the bridge's receipt messages and stages *its own* read
 2. **`reduce.ts:567` derives `stagedBy` from the trusted append actor.** If it were caller-supplied, §8.2's honesty argument collapses. *Confirmed rounds 1–2.*
 3. **`proposal_sources` structurally requires an in-room `messages` row** — `schema.ts:1201-1206`. *Confirmed rounds 1–2.*
 4. **A window that ends at its citations is refused** — `escalation.ts:2107-2112` → `:1058` (`refer`) → `acceptance.ts:758-768` (`quiet`). If a bridge receipt could reach `needs_you` while citing only its own newest message, **P1 dissolves and §9 works as written.**
-5. **`reconcileStoredAttention` has one non-test call site** — `interpret.ts:550`. If attention is persisted anywhere else, P2 dissolves.
-6. **`claimWindow` has no author filter** — `interpret.ts:648-673`. If one exists, P3 dissolves.
+5. **`reconcileStoredAttention` is exported and self-contained** — `attention-projection.ts:36-102`, signature `{db, state, roomId, messages, now}`; the caller supplies `state` (`interpret.ts:552`). This is what makes attention persistence a bridge-worker step (§7.3) rather than an atrium precondition. If it secretly depended on interpretation-worker-only context, it would revert to a precondition. *Confirmed round 4.*
+6. **`claimWindow` has no author filter and `messages` has no author-kind column** — `interpret.ts:648-673`, `schema.ts:1016`. If either existed, P3 dissolves. *Confirmed round 4.*
 7. **`mintAgentSession` issues a real Better Auth session** — `principal.ts:197-227`, `:218`. If an agent session were already capability-restricted, §6 is over-built.
 8. **`DecisionPayload` strips unknown keys** — `objects.ts:19-24`, a plain `z.object` with no `passthrough`. If payloads survived intact, §9.3 could put the envelope there instead of the message body.
 9. **`decision` never auto-accepts and reaches `needs_you` only at ≥θ_auto** — `policy.ts:128`; `acceptance.ts:871-879`, `:907-915`; `attention.ts:827`.
