@@ -24,6 +24,47 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Round 3 review (2026-08-12, iteration 16 — the goal's completion clause)
+Queue was dry (25 done, 2 needs-lars) → fresh review round executed: two Explore agents over
+the post-round-2 tree. Daemon: squad-manager re-measured at 13,570 lines/380 fields with a
+per-region coupling map — the voice surface named as the target shape (23 delegations/12
+fields over the 64-method coordinator); server.ts's 1,748-line handle() measured (99
+matchers). Webapp: the unreachable-surface CLASS found — nothing scans webapp/** exports and
+typechecked tests keep dead symbols green: VoiceCallHud (305 lines, 30-case suite, renders
+into nothing, took the idle-hangup warning down with it), the spawn-proposal hub trio (~226
+lines, doorless card whose copy claims wiring that doesn't exist), AdoptCard (complete
+vertical, no mount). Confirmed the 10-min-toast-vs-3-min-cap lie at VoiceCallContext:408.
+Refuted round-2's "VoiceCallSession class" framing (no state to own — consumer-table file
+split instead). Report: plans/deepen-modules/review-round-3.html (also published as an
+artifact). FOURTEEN candidates queued as concerns 28–41 (10 Strong, 4 Worth-exploring; 39+40
+carry named product gates). Below-cut recorded in the report: LandLane seam B (re-measure
+after 28), FeaturePlaneBridge, TranscriptStreamBuffer, channelTimeline window/paging move,
+shared card-emit primitive (waits on #381), grok CLI ops.
+
+## Round 3, iteration 15 (2026-08-12, goal mode — PR #381) — CONCERN 21 DONE — QUEUE RESOLVED
+UnitCardProjector: the manager's hand-rolled projection half becomes a module (363 lines behind
+an 8-closure port; manager sheds ~230). Grok's parity table: all 9 moved bodies byte-parity
+PASS. Codex's two Mediums both landed: the roomWorthy/gateClassOf collapse (two documented
+questions, one dep — the planned grace-period widening would have silently pinned needs-you
+cards to gate-only) and the incomplete structural slice (`options.task` crossed the port behind
+a cast). And the round's native row is the run-the-callers lesson yet again: the full root
+suite caught voice-ratchet's string scanner going blind on the moved needs-you copy — the
+targeted projection suites were all green. Every concern now shows done or needs-lars (13, 26):
+the queue is dry. Next: the round-3 architecture-review — the goal's completion clause.
+
+## Round 3, iteration 10 (2026-08-11, goal mode — docs) — CONCERN 26 → needs-lars
+The product gate is the whole remaining surface: report-raised/attention cards ARE the thing
+"does a non-blocking proposal earn a room card?" asks about, and both enabling seams already
+shipped (19's lane chokepoint, 09's one-entry registry). Disposition recorded with the question
+verbatim + the ration-harder alternative named. No pre-gate slice existed.
+
+## Round 3, iterations 10a+10b (2026-08-12 — PR #377) — 26 → needs-lars, 27 DONE (adjudicated)
+The dead-region inventory decayed under this round's own landings: 3 of 8 families ALIVE, the
+split half executed by #373/#375, and deleting conformance-gated mirrors hours after gating them
+would whipsaw. Executed the residue (4 dead api.ts client functions, one-sided by design — CLI
+still consumes the endpoints); the reader-less wire fields stay as documented mirrors, each
+future deletion a named omit-list decision. Full adjudication in the concern file.
+
 ## Round 2 (2026-08-04, iteration 37 — the goal's completion clause)
 Queue was dry (14 done, 3 needs-lars) → fresh review round executed: two Explore agents over
 current main (daemon: squad-manager regions with per-region coupling counts, Store, CLI,

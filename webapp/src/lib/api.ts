@@ -140,7 +140,11 @@ export interface VoiceKeyStatus {
   updatedBy?: string;
 }
 
-/** Read the session org's voice-key status (admin tier server-side; a non-admin call 403s). */
+/** Read the session org's voice-key status (admin tier server-side; a non-admin call 403s).
+ *  RESTORED after a dead-code sweep deleted it (codex H, concern 27 round): it had zero callers
+ *  because PeopleSurface fetched the WRONG raw URL (/api/org/voice-key GETs 404 — that path only
+ *  supports PUT/DELETE) and swallowed the 404 into "no key stored" — a false admin surface.
+ *  The helper is the one place the real route is spelled. */
 export function getOrgVoiceStatus(): Promise<VoiceKeyStatus> {
   return apiJson<VoiceKeyStatus>("/api/org/voice");
 }
@@ -274,23 +278,6 @@ export async function fetchPlanReality(featureId: string, repo: string): Promise
 // the wire shapes and coercers — these fetchers return `unknown` on purpose so the coercers stay
 // the single trust boundary).
 // -----------------------------------------------------------------------------------------------
-
-/** `GET /api/metrics/learning-loop` — flag resolution + per-metric rollups (src/metrics.ts). */
-export function fetchLearningLoop(): Promise<unknown> {
-  return apiJson<unknown>('/api/metrics/learning-loop');
-}
-
-/** `GET /api/after-action` — every durable post-mortem the daemon has written (src/after-action.ts).
- *  Reports outlive their auto-reaped roster rows; filter client-side with `reportsForAgents`. */
-export function fetchAfterActions(): Promise<unknown> {
-  return apiJson<unknown>('/api/after-action');
-}
-
-/** `GET /api/symptoms?browse=1` — newest recurring failure modes across the actor-visible repos
- *  (src/symptoms.ts). Distinct contract from the rank-only `?q=` search the ⌘K palette uses. */
-export function browseSymptoms(topK = 20): Promise<unknown> {
-  return apiJson<unknown>(`/api/symptoms?browse=1&topK=${topK}`);
-}
 
 /** Voice capability probe (`GET /api/voice/config`) — the one honest discovery channel for whether
  *  voice is enabled/configured (no webapp code consumes `/api/settings` flags; see DESIGN.md's
