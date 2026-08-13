@@ -219,3 +219,32 @@ residuals equal-or-shallower. Thirteen build/fix/confirm rounds total, ~57 adjud
 zero fail-open shipped. This IS the price of "glance gates code fail-closed" — and paying it on
 glance's OWN rail, before atrium, is the whole point of the sequencing. Remaining: B5 (artifact-2
 proof, running), the bridge-doc tri-lineage (artifact-3 confirm), then T-FINAL stays blocked on Lars.
+
+## 2026-08-12 — bridge doc DELIVERED (#388, artifact 3), 5 rounds — and the 2nd cross-lineage catch
+
+The Phase-5 bridge doc closed as an honest decision input for atrium's own future gauntlet. Its
+arc was different from the code lanes — the "defects" were mischaracterizations, not bugs:
+- **R1-R3** (earlier): the design kept hitting atrium's acceptance engine (certifiable-window,
+  auto-accept, attention-persistence) — the finding was that "stage into the room and let the
+  ledger surface it" fights the engine at three points. Reframed to solve-or-name.
+- **R4**: opus code-verified the preconditions and demoted P2 to bridge-side (idempotent rows).
+- **R5**: codex's independent cross-check caught what opus missed — `reconcileStoredAttention`
+  reads outside its write tx then upserts unconditionally, so a second worker resurrects a
+  dismissed attention item. Idempotent ROWS ≠ safe against stale OVERWRITE. P2 corrected to its
+  true third state: bridge-side-in-mechanism + a concurrency precondition absent from both repos.
+
+**The 2nd cross-lineage catch of the session, and the same lesson as the 1st.** On B4, codex
+caught a `COMPOSE_ENV_FILES` bypass that grok's pass enabled. Here, codex caught a concurrency
+race opus's pass declared safe. Both times: one capable lineage verified the surface property
+(env scrubbed / rows idempotent) and stopped; the second saw one level deeper (a config-var that
+reopens the env / a TOCTOU that overwrites the row). This is the empirical case for the
+both-lineage-on-trust-boundary rule — not that two reviews are better in the abstract, but that
+each lineage has a characteristic depth-of-first-look, and the defects live just past it. The
+orchestrator verified each catch against code before accepting it (both held). Recorded for
+auto-memory alongside the prefix/suffix-not-a-boundary lesson.
+
+Honest final framing handed to Lars: the bridge is sound in trust design (no machine reaches ✓),
+and Phase 5 needs P1 (certifiable window) + P3 (interpretation exclusion) as atrium migrations
+plus a P2 attention-reconcile serialization satisfiable either side — all moot until P1, which is
+THE gating decision. A doc that says precisely what atrium must build first, verified against
+atrium's code by two lineages, is a stronger Phase-5 input than one claiming more is solved.
