@@ -78,6 +78,10 @@ export const LandReceiptSchema = Schema.Struct({
 	repo: Schema.String,
 	branch: Schema.String,
 	commit: Schema.optional(Schema.String),
+	// The pre-merge head the gate verified (glance#392 G8). MUST be listed here or Schema.Struct would
+	// STRIP it on decode of an operator-supplied `--receipt`, and the wedge could never match the
+	// pre-merge head it proves.
+	headCommit: Schema.optional(Schema.String),
 	message: Schema.optional(Schema.String),
 	files: Schema.Array(Schema.String),
 	insertions: Schema.optional(Schema.Number),

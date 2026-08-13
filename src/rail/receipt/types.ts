@@ -99,6 +99,16 @@ export interface LandReceipt {
 	branch: string;
 	/** The landed commit SHA (full). Absent when nothing merged (a rejected land). */
 	commit?: string;
+	/**
+	 * The PRE-MERGE head commit the gate actually verified — the tip of the PR branch the scratch-merge
+	 * gate + validator graded, captured BEFORE the merge (glance#392, R1 G8). Distinct from `commit`
+	 * (the post-merge merge commit): a PRE-MERGE required check runs against the PR's CURRENT head, which
+	 * equals THIS SHA, never the merge commit that doesn't exist yet. The wedge (`verifyReceiptForPr`)
+	 * matches a PR's live head against `headCommit ?? commit` — so a rail receipt can green the exact
+	 * pre-merge head it proves, while an agent/post-merge receipt (no `headCommit`) keeps the old
+	 * merge-commit semantics. Absent on an ordinary agent land and on any land with no gated head.
+	 */
+	headCommit?: string;
 	/** The landed commit's subject line — the human-written "what/why" of the change. Absent when
 	 *  nothing merged, or when it couldn't be read. A core part of approving a receipt, not a diff. */
 	message?: string;
