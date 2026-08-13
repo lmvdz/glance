@@ -24,6 +24,10 @@ import type {
   VoiceCallState,
   VoiceCallTerminalReason,
 } from '../api';
+// registerPresentation + withoutRawRoomEvents moved to channelTimeline.ts (concern 25 slice 2b —
+// they were card-system code that only HISTORICALLY lived here); re-exported so voice-side
+// importers keep one hop.
+export { isRawRoomEvent, registerPresentation, withoutRawRoomEvents, type RegisterPresentation } from '../channelTimeline';
 import type { ChannelCardRegister } from '../channelTimeline';
 import type { ChannelEntry } from '../dto';
 
@@ -31,76 +35,6 @@ import type { ChannelEntry } from '../dto';
 // Epistemic register (DESIGN.md addendum — first real emitter is the voice-decision card)
 // =================================================================================================
 
-/**
- * How a face's TEXT is presented given the register its emitter asserted.
- *
- * Three rules, all from the addendum:
- *
- * 1. **Claim renders italic, unverified renders with a dashed underline.** A register that only
- *    changed a colour would be indistinguishable from every other muted thing on the card.
- * 2. **WCAG-AA-checked ink tokens, and NO opacity stacking.** The card body is already muted; a
- *    second `opacity` layer on top of it is how "this is the agent's own account" quietly becomes
- *    "this is unreadable". Each colour below is a literal, contrast-checked value against the
- *    room's `#09090A` timeline backdrop — never `opacity-60` over an already-dimmed parent.
- * 3. **The register is ANNOUNCED, not only styled.** Italics and a dashed underline are invisible
- *    to a screen reader. `ariaLabel` names the register on a `role="note"` wrapper, which gives the
- *    region an accessible name while still exposing the text inside it.
- */
-export interface RegisterPresentation {
-  /** Inline style for the text element. Colour is a checked token; never an opacity. */
-  style: { fontStyle?: 'italic'; color: string; textDecoration?: string; textDecorationStyle?: 'dashed'; textUnderlineOffset?: string; textDecorationColor?: string };
-  /** Accessible name for the `role="note"` wrapper, so the register is spoken. */
-  ariaLabel: string;
-  /** The short visible marker beside the text, for readers who cannot see italics as meaning. */
-  marker?: string;
-  /** Hover/`title` explanation — the long form of the same fact. */
-  title: string;
-}
-
-/**
- * Contrast against the room timeline's `#09090A` backdrop, measured, not guessed:
- *  - `#E6E4E0` → 14.4:1 (claim)      — AA and AAA for body text.
- *  - `#DEDEE2` → 14.7:1 (checked)    — the timeline's own body colour, unchanged.
- *  - `#E4E1DC` → 14.2:1 (unverified) — same family; the dashed underline carries the meaning.
- * All three clear 4.5:1 by a wide margin, which is the point: the register must never be paid for
- * in legibility.
- */
-const REGISTER_INK: Record<ChannelCardRegister, string> = {
-  claim: '#E6E4E0',
-  checked: '#DEDEE2',
-  unverified: '#E4E1DC',
-};
-
-/** The dashed rule under unverified text. Ember-muted rather than full ember: it is a caveat, not
- *  the view's one focal action. 4.6:1 against the backdrop, so it is visible on its own. */
-const UNVERIFIED_RULE = '#B98A55';
-
-export function registerPresentation(register: ChannelCardRegister | undefined): RegisterPresentation | undefined {
-  if (register === 'claim') {
-    return {
-      style: { fontStyle: 'italic', color: REGISTER_INK.claim },
-      ariaLabel: "The agent's own account",
-      marker: 'the agent says',
-      title: "The agent's own account of the question. The room recorded that it was asked — not that it is true.",
-    };
-  }
-  if (register === 'unverified') {
-    return {
-      style: { color: REGISTER_INK.unverified, textDecoration: 'underline', textDecorationStyle: 'dashed', textDecorationColor: UNVERIFIED_RULE, textUnderlineOffset: '3px' },
-      ariaLabel: 'Unverified',
-      marker: 'unverified',
-      title: 'Nothing has checked this. It is recorded as stated, and no more than that.',
-    };
-  }
-  if (register === 'checked') {
-    return {
-      style: { color: REGISTER_INK.checked },
-      ariaLabel: 'Checked by the daemon',
-      title: 'The daemon observed this itself.',
-    };
-  }
-  return undefined;
-}
 
 // =================================================================================================
 // Call phase chrome — fixed size, honest labels
@@ -119,7 +53,7 @@ export type CallPhase = VoiceCallState | 'none' | 'checking';
 
 /**
  * The phase word. Deliberately short and, crucially, RESERVED to a constant width by the caller —
- * the HUD reserves `PHASE_LABEL_CH` characters so the chrome never reflows as a call moves through
+ * surfaces reserve a fixed label width so chrome never reflows as a call moves through
  * connecting → live → degraded → ended. A control row that resizes under the pointer is a control
  * row you mis-click.
  */
@@ -146,44 +80,6 @@ export const PHASE_LABEL: Record<CallPhase, string> = {
 export function callPhase(binding: VoiceCallBindingDTO | null, loading: boolean): CallPhase {
   if (binding) return binding.state;
   return loading ? 'checking' : 'none';
-}
-
-/** Widest label above, in `ch` units, so every phase occupies exactly one reserved box. */
-export const PHASE_LABEL_CH = Math.max(...Object.values(PHASE_LABEL).map((label) => label.length));
-
-/**
- * The binding banner — which call, and which session it is PINNED to.
- *
- * `VoiceCallPill` carries the same idea for the dispatcher lane (`bindingBannerText`), and it earns
- * its place here for a sharper reason: the daemon pins a session identity at connect time and
- * refuses to adopt a different one on the same port (`port-reused`). Printing the pinned id is what
- * lets a person confirm, after a reload, that the call they are looking at is the call they
- * started — not a stranger that inherited the port.
- *
- * `undefined` before the broker has answered: there is genuinely nothing pinned yet, and inventing
- * a placeholder id would be the one thing this banner exists to prevent.
- */
-export function bindingBanner(binding: VoiceCallBindingDTO | null): string | undefined {
-  if (!binding?.callId) return undefined;
-  const session = binding.sessionId ? ` · session ${binding.sessionId}` : ' · session not pinned yet';
-  return `call ${binding.callId}${session}`;
-}
-
-/** The sentence under the phase word. Says what is actually happening, including the two states a
- *  call HUD is normally tempted to paper over — plus, now, the THIRD: `loading` says the room does
- *  not know yet, which reads honestly rather than as a confident (and possibly wrong) "no call". */
-export function phaseExplanation(binding: VoiceCallBindingDTO | null, loading: boolean = false): string {
-  if (!binding) return loading ? 'Checking whether a call is already live in this thread…' : 'No call is bound to this thread.';
-  switch (binding.state) {
-    case 'connecting':
-      return 'Dialling the session and waiting for it to answer.';
-    case 'live':
-      return 'The mic is open. Speak, or type in the composer to steer.';
-    case 'degraded':
-      return 'The live socket dropped. Checking with the call broker whether the session is still running — nothing is being lost from the record.';
-    case 'ended':
-      return terminalReasonCopy(binding.terminalReason, binding.terminalError);
-  }
 }
 
 /** Honest end-of-call copy, one sentence per terminal reason. Mirrors the daemon's own taxonomy
@@ -274,31 +170,11 @@ export function retentionNotice(binding: VoiceCallBindingDTO): RetentionNotice {
 // =================================================================================================
 // Idle policy (concern 05: 10-minute idle hangup, spoken warning at ~9 minutes)
 // =================================================================================================
-
+/** The recorded 10-minute idle-hangup policy value (OMP_COVEN_IDLE_HANGUP_MS default) — a POLICY
+ *  MIRROR, not display code: tests/voice-spine-policy.test.ts pins it cross-tree (concern 05
+ *  default #2). RESTORED after slice 2a wrongly swept it with the hud display helpers (the root
+ *  policy suite caught it — grok's dying narration had flagged exactly this). */
 export const IDLE_HANGUP_MS = 10 * 60 * 1000;
-export const IDLE_WARNING_MS = 9 * 60 * 1000;
-
-/**
- * The idle line, aware of how long the call has actually been quiet. Three registers, because a
- * standing policy and an imminent hangup are not the same message:
- *  - quiet for under a minute → the policy, stated once, calmly.
- *  - past the warning point → the fact that the session is about to say so out loud.
- *  - in between → the remaining minutes, rounded down so it can never over-promise.
- * `lastActivityAt` is the last human OR agent activity, per concern 05's wording.
- */
-export function idlePolicyLine(lastActivityAt: number | undefined, now: number): string {
-  if (lastActivityAt === undefined) return 'The call hangs up after 10 minutes with no one speaking. You hear a spoken warning a minute before.';
-  const idle = Math.max(0, now - lastActivityAt);
-  if (idle >= IDLE_HANGUP_MS) return 'Nobody has spoken for 10 minutes — the call is hanging up.';
-  if (idle >= IDLE_WARNING_MS) return 'Nobody has spoken for nine minutes. The session says so out loud, then hangs up at ten.';
-  if (idle < 60_000) return 'The call hangs up after 10 minutes with no one speaking. You hear a spoken warning a minute before.';
-  const remaining = Math.floor((IDLE_HANGUP_MS - idle) / 60_000);
-  return `Quiet for ${Math.floor(idle / 60_000)} minutes. It hangs up in ${remaining === 1 ? 'a minute' : `${remaining} minutes`}, with a spoken warning first.`;
-}
-
-/** Where the S2S dispatcher lane stands (concern 05: kept, outside room calls only). Shown on the
- *  room's call entry so the two lanes are never mistaken for one control. */
-export const S2S_OUTSIDE_ROOMS_NOTE = 'Rooms use the live call lane only. The older speak-to-the-dispatcher button stays available outside a room.';
 
 /** Which decision classes the room refuses to resolve by voice (concern 05: destructive/outward
  *  actions are UI-only). Everything else is voice-resolvable through read-back plus confirmation. */
@@ -551,52 +427,13 @@ export function shouldSteer(args: { callState: VoiceCallState | undefined; menti
 // Raw activity suppression — `yield`, heartbeats, empty completions never render
 // =================================================================================================
 
-/**
- * Kinds that are pure machine bookkeeping. DESIGN.md's "Workspace activity" row: artifacts and
- * material status are primary, raw tool activity is diagnostic-only — "tool calls such as `yield`
- * do not tell the human what changed".
- *
- * Matched case-insensitively against the wire kind so a daemon spelling it `toolYield` or
- * `tool-yield` is caught by the same rule, and normalised so `tool:yield` is too.
- */
-const RAW_EVENT_KINDS = new Set(['yield', 'toolyield', 'yieldturn', 'heartbeat', 'keepalive', 'ping', 'pong', 'noop', 'idle', 'emptycompletion', 'tick']);
 
-function normalizeKind(kind: string): string {
-  return kind.toLowerCase().replace(/[^a-z]/g, '');
-}
-
-/**
- * `true` for an entry the default room must not render.
- *
- * Two rules, both narrow on purpose:
- *  1. The event kind is raw bookkeeping (above).
- *  2. It is an EMPTY activity event — an event-bearing entry whose kind carries no face and whose
- *     text is blank. An empty completion is the "the agent did a lap and produced nothing" event;
- *     rendering it teaches a reader to skim past the ones that do say something.
- *
- * A plain user/agent MESSAGE with empty text is deliberately NOT suppressed here — that is a
- * different bug in a different place, and silently swallowing it would hide it.
- */
-export function isRawRoomEvent(entry: Pick<ChannelEntry, 'text' | 'event'> & { displayText?: string }): boolean {
-  const kind = entry.event?.kind;
-  if (!kind) return false;
-  if (RAW_EVENT_KINDS.has(normalizeKind(kind))) return true;
-  const hasText = Boolean((entry.displayText ?? entry.text ?? '').trim());
-  if (hasText) return false;
-  const payload = entry.event?.payload;
-  const hasFace = !!payload && typeof payload === 'object' && !Array.isArray(payload) && 'face' in (payload as Record<string, unknown>);
-  return !hasFace;
-}
-
-export function withoutRawRoomEvents<T extends Pick<ChannelEntry, 'text' | 'event'>>(entries: readonly T[]): T[] {
-  return entries.filter((entry) => !isRawRoomEvent(entry));
-}
 
 // =================================================================================================
 // Thread-scoped status region
 // =================================================================================================
 
-export type ThreadStatusKind = 'no-call' | 'ended-unexpectedly' | 'degraded' | 'open-decisions' | 'review-queue' | 'active-agents' | 'all-clear';
+export type ThreadStatusKind = 'no-call' | 'ended-unexpectedly' | 'retention-mismatch' | 'degraded' | 'open-decisions' | 'review-queue' | 'active-agents' | 'all-clear';
 
 export interface ThreadStatus {
   kind: ThreadStatusKind;
@@ -639,6 +476,20 @@ export function threadStatus(input: ThreadStatusInput): ThreadStatus {
   }
   if (endedUnexpectedly(binding)) {
     return { kind: 'ended-unexpectedly', headline: 'The call ended unexpectedly.', detail: terminalReasonCopy(binding.terminalReason, binding.terminalError), tone: 'destructive', count: 0 };
+  }
+  // Retention mismatch outranks everything but a dead call (codex H, concern 25 round): the room
+  // asked for one recording posture and the live session reports another — a privacy/trust fact.
+  // The daemon's durable mismatch CARD scrolls away with the timeline; this standing region was
+  // saying "All clear" over it. The deleted call HUD was the only alert renderer; the precedence
+  // ladder is its honest replacement on the surface that actually stands.
+  if (binding.retentionMismatch && binding.state !== 'ended') {
+    return {
+      kind: 'retention-mismatch',
+      headline: `Recording mismatch: the room asked for "${binding.retentionMismatch.expected}" but the live session reports "${binding.retentionMismatch.reported}".`,
+      detail: 'What is actually being kept follows the SESSION, not the room setting. End the call if the reported posture is not acceptable.',
+      tone: 'destructive',
+      count: 0,
+    };
   }
   if (binding.state === 'degraded') {
     return { kind: 'degraded', headline: 'The live view is degraded.', detail: 'The socket dropped and the room is confirming with the broker whether the session is still running. The record is unaffected — it comes from the journal, not this socket.', tone: 'warning', count: 0 };
@@ -916,10 +767,6 @@ export function reconcileArtifactPane(stack: PaneStackEntry[], artifactRowById: 
   if (top.pane === 'artifact' && top.artifactId && !artifactRowById.has(top.artifactId)) return popPane(stack);
   return stack;
 }
-
-// =================================================================================================
-// The call HUD lives in the fixed header — it never scrolls out of view
-// =================================================================================================
 
 /**
  * What pressing a `voice-call` card's "Open the call" door actually does.

@@ -18,7 +18,7 @@ import { useRoomCall } from '../../hooks/useRoomCall';
 import { useRoomCallAudio } from '../../hooks/useRoomCallAudio';
 import { useVoiceCallTranscript } from '../../hooks/useVoiceCallTranscript';
 import { useVoiceCallsSurface } from '../../hooks/useVoiceCallsSurface';
-import {
+import { browserAudioStatusLine,
   ALL_AGENTS,
   artifactAgentOptions,
   attentionChipLabel,
@@ -180,11 +180,12 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
   // Concern 09 (browser-audio-transport): opens the browser's mic/speaker relay only once the
   // daemon itself confirms this call is audio-less AND live (`audioAvailable` is already both
   // `noLocalAudio` and `controlsAvailable`, daemon-checked) — a device-audio call never touches
-  // this hook at all beyond the one boolean it reads. The hook is kept for exactly that side
-  // effect; its status/error fields aren't read anywhere — they only ever fed the standing call
-  // banner removed in the post-ship fix (fleet navbar + composer call controls), and
-  // re-surfacing them elsewhere wasn't part of that fix's scope.
-  useRoomCallAudio(activeChannelId, call.binding?.audioAvailable === true);
+  // this hook at all beyond the one boolean it reads. Its status/error/retry now feed the
+  // standing VoiceStatusRegion (codex H, concern 25 round): after the call-banner removal a
+  // denied mic or refused relay looked like a healthy call with no sound and no recourse —
+  // the hook state was computed and thrown away right here.
+  const callAudio = useRoomCallAudio(activeChannelId, call.binding?.audioAvailable === true);
+  const callAudioLine = useMemo(() => browserAudioStatusLine({ micStatus: callAudio.micStatus, relayStatus: callAudio.relayStatus, error: callAudio.error }), [callAudio.micStatus, callAudio.relayStatus, callAudio.error]);
   const routedEntryId = route.kind === 'hub' ? route.entryId : undefined;
   const selectedAgent = useMemo(() => agents.find((agent) => agent.id === selectedAgentId), [agents, selectedAgentId]);
   const selectedTask = useMemo(() => tasks.find((task) => task.id === selectedTaskId), [tasks, selectedTaskId]);
@@ -760,6 +761,7 @@ export function HubShell({ route, renderWorkbench }: { route: HubRoute; renderWo
                     onOpenArtifacts={call.binding ? openArtifacts : undefined}
                     artifactCount={call.artifacts.length}
                     onOpenCalls={openCalls}
+                    audio={callAudioLine ? { line: callAudioLine, onRetry: callAudio.retry } : undefined}
                   />
                 </div>
               }

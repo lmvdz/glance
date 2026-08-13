@@ -95,6 +95,21 @@ conformance-gated mirrors (24's file), payloads = runtime test. Codex proved the
 carries zero daemon modules under the real vite config and every semantic widening has zero
 production reads; 2 doc Lows fixed. Grok narration-only x2. Gates: check 0, vite green, root
 5332/2-inherited, webapp 2002/0.
+## Round 3, iteration 12 (2026-08-12, goal mode — PR #379) — CONCERN 25 STEP 1
+The dead-component sweep (~1,300 lines) with the queue's best convergent round: both lineages
+independently named the same five feature orphans. Adjudicated three ways: 2 standing-status
+gaps FIXED here (retention-mismatch precedence + role=alert; browser-audio error/retry
+remounted), 3 pre-existing inert flows QUEUED with evidence (spawn-proposal doorless, adoption
+surfaceless, D3 lib halves test-only), 3 replaced + 2 safely-dead confirmed. Concern stays open
+for slices 2-3 (helper deletion + region lifts + consumer split).
+
+## Round 3, iteration 13 (2026-08-12, goal mode — PR #379) — CONCERN 25 DONE (step 3 → round 4)
+Slices 2a+2b: six hud helpers deleted, card regions re-homed byte-identically. THE ROUND'S BEST
+CATCH CHAIN: grok's dying narration flagged IDLE_HANGUP_MS, the root policy suite broke on it,
+codex reproduced it — a POLICY MIRROR wrongly swept as display code, restored; its sibling
+deleted as a default-mirror that would lie under overrides. Step 3 (consumer split + PaneStack
+parameterization + VoiceCallSession) carried to round 4 as a named candidate — the delivered
+value (~1,500 dead lines, 2 live fixes) stands alone.
 
 ## Round 2 (2026-08-04, iteration 37 — the goal's completion clause)
 Queue was dry (14 done, 3 needs-lars) → fresh review round executed: two Explore agents over
