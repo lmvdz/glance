@@ -93,7 +93,10 @@ const c = JSON.parse(readFileSync(new URL("./control.json", import.meta.url), "u
 // A tsc-shape gate: a real (tiny) source scan, then the summary. Discovered by the CONTRACT's
 // "typecheck" gate, not by package.json name-matching — the point of the class.
 process.stdout.write("tsc: 2 workspace projects, 0 errors\\n");
-process.exit(c.typecheck?.exit ?? 0);
+// F1 (gauntlet): set exitCode and let the process exit NATURALLY — process.exit() can terminate before
+// the async stdout buffer flushes under PIPED capture (the rail's gate runner pipes stdout), dropping
+// this summary. A proof that lands or refuses on flush-timing is no proof.
+process.exitCode = c.typecheck?.exit ?? 0;
 `;
 }
 function lintScript(): string {
@@ -101,7 +104,7 @@ function lintScript(): string {
 const c = JSON.parse(readFileSync(new URL("./control.json", import.meta.url), "utf8"));
 // Biome-shape: the class detection was BLIND to (R2 — Biome invisible to package.json guessing).
 process.stdout.write("biome: checked 4 files, no fixes applicable\\n");
-process.exit(c.lint?.exit ?? 0);
+process.exitCode = c.lint?.exit ?? 0; // F1: natural exit flushes piped stdout; process.exit() can truncate it
 `;
 }
 function vitestScript(): string {
@@ -117,7 +120,7 @@ if (tests === 0) {
   process.stdout.write(" Test Files  2 passed (2)\\n");
   process.stdout.write("      Tests  " + tests + " passed (" + tests + ")\\n");
 }
-process.exit(exit);
+process.exitCode = exit; // F1: natural exit flushes piped stdout; process.exit() can truncate it
 `;
 }
 function assertCountsScript(): string {
@@ -127,7 +130,7 @@ const c = JSON.parse(readFileSync(new URL("../gates/control.json", import.meta.u
 // rail's counts-script parser reads and checks against the manifest's exactCounts.
 process.stdout.write("files=" + (c.counts?.files ?? 3) + "\\n");
 process.stdout.write("cases=" + (c.counts?.cases ?? 12) + "\\n");
-process.exit(c.counts?.exit ?? 0);
+process.exitCode = c.counts?.exit ?? 0; // F1: natural exit flushes piped stdout; process.exit() can truncate it
 `;
 }
 

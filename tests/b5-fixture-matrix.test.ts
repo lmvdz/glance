@@ -108,21 +108,33 @@ async function dockerBounded(args: string[], timeoutMs = 30_000): Promise<{ code
 async function sweepThisRunsCompose(): Promise<string | undefined> {
 	if (!dockerUp) return undefined;
 	const problems: string[] = [];
-	for (const [kind, listArgs, rmArgs] of [
-		["container", ["ps", "-aq", "--filter", `name=${PROJECT_PREFIX}`], ["rm", "-f"]],
-		["network", ["network", "ls", "-q", "--filter", `name=${PROJECT_PREFIX}`], ["network", "rm"]],
+	// containers (`rm -f -v` also drops their anonymous volumes), networks, and named volumes — each
+	// scoped to THIS run's prefix. F2 (gauntlet): a nonzero list/relist exit is a teardown FAILURE, NOT
+	// "nothing survived" — an inspection that couldn't run cannot prove the resource is gone.
+	for (const { kind, list, rm } of [
+		{ kind: "container", list: ["ps", "-aq", "--filter", `name=${PROJECT_PREFIX}`], rm: ["rm", "-f", "-v"] },
+		{ kind: "network", list: ["network", "ls", "-q", "--filter", `name=${PROJECT_PREFIX}`], rm: ["network", "rm"] },
+		{ kind: "volume", list: ["volume", "ls", "-q", "--filter", `name=${PROJECT_PREFIX}`], rm: ["volume", "rm", "-f"] },
 	] as const) {
-		const listed = await dockerBounded([...listArgs]);
+		const listed = await dockerBounded([...list]);
+		if (listed.code !== 0) {
+			problems.push(`could not inspect owned ${kind}s (docker exited ${listed.code}: ${listed.stdout.slice(0, 160)}) — refusing to read that as 'none survived'`);
+			continue;
+		}
 		const ids = listed.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
 		if (!ids.length) continue;
 		console.warn(`[B5 #394] sweeping ${ids.length} owned ${kind}(s) under ${PROJECT_PREFIX}-* (the rail's own teardown should have handled these).`);
-		const rm = await dockerBounded([...rmArgs, ...ids]);
-		if (rm.code !== 0) problems.push(`docker ${rmArgs[0]} for ${kind}s exited ${rm.code}: ${rm.stdout.slice(0, 200)}`);
-		const still = await dockerBounded([...listArgs]);
-		const remaining = still.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+		const rmRes = await dockerBounded([...rm, ...ids]);
+		if (rmRes.code !== 0) problems.push(`docker ${rm.join(" ")} for ${kind}s exited ${rmRes.code}: ${rmRes.stdout.slice(0, 200)}`);
+		const relist = await dockerBounded([...list]);
+		if (relist.code !== 0) {
+			problems.push(`could not RE-inspect owned ${kind}s after removal (docker exited ${relist.code}) — cannot confirm they are gone`);
+			continue;
+		}
+		const remaining = relist.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
 		if (remaining.length) problems.push(`${remaining.length} ${kind}(s) under ${PROJECT_PREFIX}-* survived removal: ${remaining.join(", ")}`);
 	}
-	return problems.length ? `[B5 #394] teardown left owned resources: ${problems.join("; ")}` : undefined;
+	return problems.length ? `[B5 #394] teardown left owned resources or could not verify: ${problems.join("; ")}` : undefined;
 }
 
 async function headOf(repo: string): Promise<string> {
@@ -197,6 +209,43 @@ const refusalReasons: Record<string, string> = {};
 const refusalCodes: Record<string, string | undefined> = {};
 
 describe("B5 #394 — the rigged-red matrix through the real rail", () => {
+	test("F1 — the emitter scripts flush their FULL output under PIPED capture (the rail's exact path)", async () => {
+		// The rail's gate runner spawns gate commands with stdout PIPED (Bun.spawn stdout:"pipe"); a script
+		// that `process.exit()`s right after `process.stdout.write` can be killed before the async buffer
+		// flushes, dropping its summary — which made R6 refuse `count-unreadable` in codex's run of this same
+		// matrix (a proof that lands-or-refuses on flush timing). Spawn each emitter exactly as the rail does
+		// and assert the captured output is COMPLETE. Repeated, because the footgun is timing-dependent — one
+		// green spawn proves nothing.
+		const fixture = await mintFixtureTenant({ label: RUN });
+		fixtures.push(fixture);
+		const emitters: { argv: string[]; must: string[]; file: string }[] = [
+			{ argv: ["node", "scripts/assert-counts.mjs"], must: ["files=3", "cases=12"], file: "scripts/assert-counts.mjs" },
+			{ argv: ["node", "gates/vitest.mjs"], must: ["Tests  12 passed (12)"], file: "gates/vitest.mjs" },
+			{ argv: ["node", "gates/typecheck.mjs"], must: ["tsc:"], file: "gates/typecheck.mjs" },
+			{ argv: ["node", "gates/lint.mjs"], must: ["biome:"], file: "gates/lint.mjs" },
+		];
+		// Host-independent regression guard: the footgun manifests on flush timing, so a slow/loaded CI can
+		// trip it where a fast host does not. Assert the SOURCE never reintroduces `process.exit(` (which can
+		// truncate) and always sets `process.exitCode` — deterministic on every host.
+		for (const e of emitters) {
+			const src = await fs.readFile(path.join(fixture.repo, e.file), "utf8");
+			// Strip line comments first — the scripts' own docs mention the footgun by name.
+			const code = src.replace(/\/\/.*$/gm, "");
+			if (/process\.exit\s*\(/.test(code)) throw new Error(`[F1] ${e.file} calls process.exit() — the flush footgun; use process.exitCode instead`);
+			expect(code).toContain("process.exitCode");
+		}
+		for (const e of emitters) {
+			for (let i = 0; i < 8; i++) {
+				const p = Bun.spawn(e.argv, { cwd: fixture.repo, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+				const [out, code] = await Promise.all([new Response(p.stdout).text(), p.exited]);
+				expect(code).toBe(0);
+				for (const m of e.must) {
+					if (!out.includes(m)) throw new Error(`[F1] ${e.argv.join(" ")} run #${i} dropped "${m}" under piped capture — captured: ${JSON.stringify(out)}`);
+				}
+			}
+		}
+	}, 60_000);
+
 	test("R1 — a gate exits non-zero → REFUSE (gate-red)", async () => {
 		// The typecheck gate's script is rigged to exit 1; pnpm propagates it. A red gate is a red land.
 		const row = await driveRow({ typecheck: { exit: 1 } }, [gateTypecheck]);
