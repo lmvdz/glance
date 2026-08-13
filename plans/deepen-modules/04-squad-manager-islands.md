@@ -1,5 +1,5 @@
 # SquadManager islands — delete the pass-through shells, move the self-contained clusters
-STATUS: in-progress
+STATUS: done
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural
@@ -41,3 +41,13 @@ channels/attention delegations — verify what each shell actually adds before c
   untouched.
 - Next: projects island, observability reads; then the shells audit (channels/attention — verify
   what each adds first; see the voice refutation above).
+
+## Done (2026-08-12, round 3 — closed as superseded)
+This umbrella's remaining scope is now carried by named concerns, so it stops being a second,
+staler copy of the queue: voice was CLEARED as already-deep (round-3 region map names it the
+target shape), attention shipped via 17/19, capabilities via 12 (above), boundary-sync via 18,
+projection via 21 (PR #381), and the re-measured remainder became concerns 28 (WorkScopeProbe),
+29 (PrReconcileLane), 31 (CommandRouter), 41 (SpawnPlan) with the region-by-region coupling
+table in review-round-3.html. An in-progress umbrella alongside a per-island queue was the
+round-1 shape; the queue IS the plan now. (Flip audited: no branch of 299 carried a done flip
+for this file — round 2's "queue resolved" count silently skipped it.)

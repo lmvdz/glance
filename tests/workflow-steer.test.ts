@@ -60,9 +60,10 @@ class RecordingInner extends EventEmitter implements AgentDriver {
 		return Promise.resolve();
 	}
 	getState(): Promise<RpcSessionState> {
-		return Promise.resolve({} as RpcSessionState);
+		return Promise.resolve({} as unknown as RpcSessionState);
 	}
 	respondUi(): void {}
+	respondHostTool(): void {}
 }
 
 /** Like RecordingInner, but holds the turn open until `finishTurn()` — so a test can observe the driver
@@ -109,9 +110,10 @@ class SlowInner extends EventEmitter implements AgentDriver {
 		return Promise.resolve();
 	}
 	getState(): Promise<RpcSessionState> {
-		return Promise.resolve({} as RpcSessionState);
+		return Promise.resolve({} as unknown as RpcSessionState);
 	}
 	respondUi(): void {}
+	respondHostTool(): void {}
 }
 
 interface Frame {
@@ -139,9 +141,9 @@ function runsCompleted(frames: Frame[]): number {
 	return frames.filter((f) => f.type === "workflow_done").length;
 }
 
-async function waitFor(pred: () => boolean, ms = 4000): Promise<void> {
+async function waitFor(pred: () => boolean | Promise<boolean>, ms = 4000): Promise<void> {
 	const t0 = Date.now();
-	while (!pred()) {
+	while (!(await pred())) {
 		if (Date.now() - t0 > ms) throw new Error("timeout waiting for condition");
 		await Bun.sleep(10);
 	}

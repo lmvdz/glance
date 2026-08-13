@@ -9,6 +9,7 @@ import type { AgentDTO, ValidationRecordDTO } from './dto';
 
 const val = (verdict: ValidationRecordDTO['verdict'], rationale = 'because'): ValidationRecordDTO => ({
   verdict,
+  ranAt: 1,
   agreement: 0,
   confidence: 0.9,
   perCriterion: [],

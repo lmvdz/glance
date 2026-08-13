@@ -55,7 +55,7 @@ const persisted = (over: Partial<PersistedAgent> & { id: string }): PersistedAge
 	...over,
 });
 
-const entry = (seq: number, kind: TranscriptEntry["kind"], text: string, over: Partial<TranscriptEntry> = {}): TranscriptEntry => ({ seq, kind, text, status: "ok", at: seq, ...over });
+const entry = (seq: number, kind: TranscriptEntry["kind"], text: string, over: Partial<TranscriptEntry> = {}): TranscriptEntry => ({ seq, kind, text, status: "ok", ts: seq, ...over });
 
 // ── 1. the pure half: placeholder / context / marker (reattach-context.ts) ──────────────────────
 

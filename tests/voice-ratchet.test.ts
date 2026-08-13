@@ -14,8 +14,13 @@ import { explains, explainsRatherThanLabels, statesBlastRadius, statesConsequenc
 const BASELINE = 7;
 
 function emittedStrings(): string[] {
-	const src = readFileSync(path.join(import.meta.dir, "..", "src", "squad-manager.ts"), "utf8");
-	const found = [...src.matchAll(/emitUnitTranscriptEvent\([^,]+,\s*[A-Z_]+,\s*`([^`]+)`/g)].map((m) => m[1]!);
+	// The needs-you emitters moved to unit-card-projector.ts (concern 21); the manager keeps the rest.
+	// Scan both, or the scan silently loses the very strings the third test exists to hold to the rule.
+	const files = ["squad-manager.ts", "unit-card-projector.ts"];
+	const found = files.flatMap((file) => {
+		const src = readFileSync(path.join(import.meta.dir, "..", "src", file), "utf8");
+		return [...src.matchAll(/emitUnitTranscriptEvent\([^,]+,\s*[A-Z_]+,\s*`([^`]+)`/g)].map((m) => m[1]!);
+	});
 	return [...new Set(found)];
 }
 
@@ -39,7 +44,7 @@ test("the strings that INTERRUPT a person all explain themselves", () => {
 	// The room-projecting classes are the ones that reach a human. Whatever the ratchet tolerates
 	// elsewhere, these are held to the rule outright.
 	const strings = emittedStrings();
-	const interrupting = strings.filter((text) => /needs you|is on main|The gate says|\$\{this\.safeEventLabel\(request\.title\)\}/.test(text));
+	const interrupting = strings.filter((text) => /needs you|is on main|The gate says|\$\{this\.safeEventLabel\(request\.title\)\}|\$\{this\.deps\.label\(request\.title\)\}/.test(text));
 	expect(interrupting.length).toBeGreaterThan(2);
 	for (const text of interrupting) {
 		const verdict = explainsRatherThanLabels(text.replace(/\$\{[^}]*\}/g, "X"));

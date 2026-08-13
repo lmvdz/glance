@@ -8,6 +8,8 @@ const feature: FeatureDTO = {
   repo: "/tmp/omp-squad",
   stage: "in-progress",
   planDir: "plans/web-dashboard",
+  assignees: [],
+  worktrees: [],
   agentIds: ["a1"],
   unlandedFiles: 0,
   divergent: false,
@@ -19,7 +21,7 @@ const feature: FeatureDTO = {
 };
 
 test("taskFromFeature preserves the starter task shape with live feature ids", () => {
-  const task = taskFromFeature(feature, [{ id: "a1", name: "Agent", status: "working", repo: feature.repo, worktree: "/tmp/wt", pending: [], lastActivity: 1, featureId: feature.id }], {
+  const task = taskFromFeature(feature, [{ id: "a1", name: "Agent", status: "working", repo: feature.repo, worktree: "/tmp/wt", pending: [], lastActivity: 1, featureId: feature.id } as unknown as import("./dto").AgentDTO], {
     id: feature.repo,
     name: "omp-squad",
     shortCode: "OS",

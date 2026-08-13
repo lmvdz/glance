@@ -1,5 +1,5 @@
 # Card-kind registry — one home per channel-card kind
-STATUS: open
+STATUS: done
 PRIORITY: p2
 REPOS: omp-squad
 COMPLEXITY: moderate
@@ -24,3 +24,18 @@ wrong-base trap. Design sketch recorded here so the slice is ready the moment th
 
 ## Provenance
 Whole-repo report candidate 4 (Worth exploring).
+
+## Done (2026-08-11, round 3 iteration 8 — PR #376)
+The registry exists and is the ONE registration: webapp/src/lib/cardKindRegistry.ts carries tone
+policy + door label + icon per kind, satisfies-exhaustive over concern 08's shared list + the
+local kinds; toneFor/DOOR_LABELS/iconClass are derivations, and (codex round) the POINTER/LOCAL
+recognition maps derive from the registry keys too — a new daemon kind is now a compile error at
+exactly ONE webapp entry plus the daemon schema table (itself already satisfies-forced). The
+silent ''Open'' and neutral fallbacks became explicit per-kind decisions with identical rendered
+text (codex proved equivalence across 3,600 tone combinations, all 24 icons, every label).
+HONEST LIMITS recorded in the module: land/gate-verdict bespoke renderers own their live
+rendering (registry fields are fallback-path-only there — unifying them is follow-up), and codex
+M2 found the same disease one layer deeper in the daemon (projectionClasses quiet node fallback,
+8/19 kinds unlisted; projectionDoorSurface silent unit default) — QUEUED for the round-3 review.
+Grok narration-only (gap row). Gates: check 0, sync 3/3, schemas 47/47, webapp 2002/0, vite
+green, root 5332/2-inherited.

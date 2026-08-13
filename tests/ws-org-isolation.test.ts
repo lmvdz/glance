@@ -135,7 +135,7 @@ function connect(url: string, key: SessionKey): Promise<Client> {
 	const ready = Promise.withResolvers<Client>();
 	const waiters: Array<{ match: (event: SquadEvent) => boolean; resolve: (event: SquadEvent) => void }> = [];
 	const messages: SquadEvent[] = [];
-	const ws = new WebSocket(url, { headers: { cookie: `session=${key}` } });
+	const ws = new WebSocket(url, { headers: { cookie: `session=${key}` } } as never);
 	sockets.push(ws);
 	const client: Client = {
 		ws,
@@ -166,7 +166,7 @@ function connect(url: string, key: SessionKey): Promise<Client> {
 
 function canOpen(url: string, cookie?: string): Promise<boolean> {
 	const opened = Promise.withResolvers<boolean>();
-	const ws = cookie ? new WebSocket(url, { headers: { cookie } }) : new WebSocket(url);
+	const ws = cookie ? new WebSocket(url, { headers: { cookie } } as never) : new WebSocket(url);
 	sockets.push(ws);
 	ws.onopen = () => {
 		ws.close();

@@ -164,7 +164,7 @@ class ScriptedBroker extends FakeBroker {
 		const callId = this.nextId();
 		const journalPath = path.join(this.journalDir, `${callId}.jsonl`);
 		writeFileSync(journalPath, "");
-		const view: BrokerCallCreated = { callId, port: this.bridge.port, bridgeUrl: this.bridge.url, journalPath, startedAt: Date.now(), exit: null, controlToken: this.controlToken, ...(this.sessionRoot ? { sessionRoot: this.sessionRoot } : {}), ...(this.noLocalAudio === undefined ? {} : { noLocalAudio: this.noLocalAudio }) };
+		const view: BrokerCallCreated = { callId, port: this.bridge.port!, bridgeUrl: this.bridge.url, journalPath, startedAt: Date.now(), exit: null, controlToken: this.controlToken, ...(this.sessionRoot ? { sessionRoot: this.sessionRoot } : {}), ...(this.noLocalAudio === undefined ? {} : { noLocalAudio: this.noLocalAudio }) };
 		this.registerLiveCall(view);
 		return view;
 	}
@@ -363,7 +363,7 @@ describe("journal-driven decision projection end-to-end", () => {
 		// but it is NOT in the two hard-coded exemptions (`terminal`, `journal-end`), so this daemon
 		// still asks the broker to reap it. Best-effort and (per the broker's own idempotent
 		// `DELETE /calls/:id`) harmless even when the process really has already exited.
-		expect(broker.reapedCallIds).toEqual([binding.callId]);
+		expect(broker.reapedCallIds).toEqual([binding.callId!]);
 		coordinator.stop();
 	});
 });
@@ -422,7 +422,7 @@ describe("distinct honest states", () => {
 		expect(ended.terminalReason).toBe("broker-exit");
 		// `broker-exit` is still reaped (best-effort, deliberately defensive even though the process is
 		// already corroborated dead) — see `reapBrokerCall`'s doc.
-		expect(broker.reapedCallIds).toEqual([binding.callId]);
+		expect(broker.reapedCallIds).toEqual([binding.callId!]);
 		// The known leak this path used to have (CRITICAL 2): `probeLiveness`'s broker-exit branch
 		// stopped the liveness probe but never the tailer, which kept polling the journal forever.
 		expect(coordinator.hasActiveRuntime("room-1")).toBe(false);
@@ -465,7 +465,7 @@ describe("distinct honest states", () => {
 		expect(coordinator.hasActiveRuntime("room-1")).toBe(false);
 		// The production defect this closes: the OLD binding's broker-spawned call is still alive (a
 		// different session merely answered on its port) — ending it as `port-reused` must reap it.
-		expect(broker.reapedCallIds).toEqual([ended.callId]);
+		expect(broker.reapedCallIds).toEqual([ended.callId!]);
 		coordinator.stop();
 	});
 
@@ -580,7 +580,7 @@ describe("distinct honest states", () => {
 		cleanups.push(bridge.stop);
 		const journalPath = path.join(journalDir, "call-ghost.jsonl");
 		writeFileSync(journalPath, "");
-		const view: BrokerCallCreated = { callId: "call-ghost", port: bridge.port, bridgeUrl: bridge.url, journalPath, startedAt: Date.now(), exit: null, controlToken: "tok-1" };
+		const view: BrokerCallCreated = { callId: "call-ghost", port: bridge.port!, bridgeUrl: bridge.url, journalPath, startedAt: Date.now(), exit: null, controlToken: "tok-1" };
 		const broker = new FakeBroker();
 		broker.registerLiveCall(view);
 		const cards: EmitCardInput[] = [];
@@ -687,7 +687,7 @@ describe("endCall", () => {
 			// `endCall` no longer reaps the broker directly — `endBinding` does it exactly once, for
 			// every non-self-terminated reason including `operator-ended`. This is a genuinely live call
 			// (not already dead), so the single reap call here is the point, not an incidental cleanup.
-			expect(broker.reapedCallIds).toEqual([result.value.callId]);
+			expect(broker.reapedCallIds).toEqual([result.value.callId!]);
 		}
 		expect(coordinator.hasActiveRuntime("room-1")).toBe(false);
 		coordinator.stop();
@@ -1541,7 +1541,7 @@ describe("onTranscriptTurn (concern 11: voice-transcript-in-thread) — live pus
 		appendFileSync(journalPath, journalLine(0, "live-abc", { type: "transcript", transcript: { turn: 0, role: "user", text: "hello there", final: true } }));
 		await waitFor(() => turns.length > 0);
 		expect(turns).toHaveLength(1);
-		expect(turns[0]).toEqual({ channelId: "room-1", callId: binding.callId, entry: { callId: binding.callId, turn: 0, role: "user", final: true, at: expect.any(Number) as unknown as number, text: "hello there" } });
+		expect(turns[0]).toEqual({ channelId: "room-1", callId: binding.callId!, entry: { callId: binding.callId!, turn: 0, role: "user", final: true, at: expect.any(Number) as unknown as number, text: "hello there" } });
 
 		// A second, different turn fires a second, distinct push — never coalesced or dropped.
 		appendFileSync(journalPath, journalLine(1, "live-abc", { type: "transcript", transcript: { turn: 0, role: "assistant", text: "hi!", final: true } }));
@@ -1600,7 +1600,7 @@ describe("onLiveTranscriptFrame (live captions fix, production defect 2026-07-28
 		const bridge = startFakeBridge("live-abc");
 		cleanups.push(bridge.stop);
 		const broker = new ScriptedBroker(journalDir, bridge);
-		const frames: Array<{ channelId: string; callId: string; entry: { role: string; text?: string; turn: number; final: boolean; redacted?: boolean } }> = [];
+		const frames: Array<{ channelId: string; callId: string; entry: { callId?: string; role: string; text?: string; turn: number; final: boolean; redacted?: boolean; at?: number } }> = [];
 		const coordinator = makeCoordinator({ stateDir, broker, cards: [], onLiveTranscriptFrame: (input) => frames.push(input as never) });
 		await coordinator.startCall("room-1", { ownerActorId: "operator" });
 		const binding = coordinator.state("room-1")!;
@@ -1609,8 +1609,8 @@ describe("onLiveTranscriptFrame (live captions fix, production defect 2026-07-28
 		await waitFor(() => frames.length > 0);
 		expect(frames[0]).toEqual({
 			channelId: "room-1",
-			callId: binding.callId,
-			entry: { callId: binding.callId, turn: 0, role: "assistant", final: false, at: expect.any(Number) as unknown as number, text: "Hel" },
+			callId: binding.callId!,
+			entry: { callId: binding.callId!, turn: 0, role: "assistant", final: false, at: expect.any(Number) as unknown as number, text: "Hel" },
 		});
 
 		// A second, growing partial for the SAME (role, turn) fires a second, distinct push — the

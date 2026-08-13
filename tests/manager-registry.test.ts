@@ -149,8 +149,8 @@ test("protectedIds is boot-seeded from persisted rosters before any manager star
 	// At boot no manager exists yet; the union MUST come from the persisted rosters, or the global
 	// reap would kill every surviving host awaiting lazy re-adoption.
 	const rosters: Record<string, StateSnapshot> = {
-		orgA: { agents: [{ id: "pa1", name: "a", repo: "/r", worktree: "/w" }], transcripts: {}, features: [] },
-		orgB: { agents: [{ id: "pb1", name: "b", repo: "/r", worktree: "/w" }], transcripts: {}, features: [] },
+		orgA: { agents: [{ id: "pa1", name: "a", repo: "/r", worktree: "/w", approvalMode: "yolo" }], transcripts: {}, features: [] },
+		orgB: { agents: [{ id: "pb1", name: "b", repo: "/r", worktree: "/w", approvalMode: "yolo" }], transcripts: {}, features: [] },
 	};
 	const store = (orgId: string): Store => ({
 		hasState: async () => true,
@@ -158,8 +158,36 @@ test("protectedIds is boot-seeded from persisted rosters before any manager star
 		save: async () => {},
 		loadFeedback: async () => ({ campaigns: [], items: [], validations: [], rewards: [] }),
 		saveFeedback: async () => {},
+		loadTranscripts: async () => ({}),
+		saveTranscripts: async () => {},
+		loadFeatures: async () => [],
+		saveFeatures: async () => {},
+		loadCapabilities: async () => ({}) as never,
+		saveCapabilities: async () => {},
 		appendAudit: async () => {},
 		appendUsage: async () => {},
+		listChannels: async () => [],
+		getChannel: async () => undefined,
+		putChannel: async () => {},
+		listNodes: async () => [],
+		getNode: async () => undefined,
+		putNode: async () => {},
+		bindNodeChannel: async () => undefined,
+		listNodeRecords: async () => [],
+		putNodeRecord: async () => {},
+		deleteNodeRecords: async () => 0,
+		listDelegationGrants: async () => [],
+		putDelegationGrant: async () => {},
+		listPlanProposals: async () => [],
+		putPlanProposal: async () => {},
+		listChannelEntries: async () => [],
+		searchChannelEntries: async () => [],
+		appendChannelEntry: async (entry) => ({ ...entry, seq: 0 }),
+		nextChannelSeq: async () => 0,
+		listChannelMemberships: async () => [],
+		putChannelMembership: async () => {},
+		getChannelReadCursor: async () => undefined,
+		putChannelReadCursor: async () => {},
 	});
 	const deps: RegistryDeps = { root: "/tmp/reg-noop", store, operator, listOrgIds: async () => ["orgA", "orgB"] };
 	const reg = new ManagerRegistry(deps);

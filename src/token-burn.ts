@@ -136,7 +136,7 @@ export function fleetTokenBurnPayload(receipts: RunReceipt[], verdict: { action:
  *  compile time, notably `title` being required rather than merely "present at runtime". */
 export interface TokenBurnFace {
 	// Index signature keeps this assignable to `Record<string, unknown>` at the one call site
-	// (`squad-manager.ts#projectionFace`) that returns it through that wider, shared return type.
+	// (`unit-card-projector.ts#face`) that returns it through that wider, shared return type.
 	[key: string]: unknown;
 	title: string;
 	eyebrow: string;

@@ -12,11 +12,17 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentDriver } from "../src/agent-driver.ts";
-import { emptyFeedbackSnapshot } from "../src/feedback.ts";
-import type { AuditEntry, Store, StateSnapshot } from "../src/dal/store.ts";
+import { emptyFeedbackSnapshot, type FeedbackSnapshot } from "../src/feedback.ts";
+import type { AuditEntry, ChannelSearchResult, Store, StateSnapshot } from "../src/dal/store.ts";
+import type { Channel, ChannelEntry, ChannelMembership, ChannelReadCursor } from "../src/channels.ts";
+import type { Node } from "../src/memory/nodes.ts";
+import type { NodeRecord } from "../src/memory/node-records.ts";
+import type { DelegationGrant } from "../src/delegation-boundary.ts";
+import type { PlanProposal } from "../src/plan-proposals.ts";
+import { normalizeCapabilitySnapshot, type CapabilitySnapshot } from "../src/capabilities/index.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { SubagentTracker } from "../src/subagents.ts";
-import type { AgentDTO, FeedbackSnapshot, PersistedAgent, RpcSessionState, RunReceipt } from "../src/types.ts";
+import type { AgentDTO, PersistedAgent, PersistedFeature, RpcSessionState, RunReceipt, TranscriptEntry } from "../src/types.ts";
 
 process.env.OMP_SQUAD_AUTODISPATCH = "0";
 
@@ -58,6 +64,58 @@ class CountingStore implements Store {
 	async saveCapabilities(_snapshot: CapabilitySnapshot): Promise<void> {}
 	async appendAudit(_entry: AuditEntry): Promise<void> {}
 	async appendUsage(_receipt: RunReceipt): Promise<void> {}
+	async listChannels(): Promise<Channel[]> {
+		return [];
+	}
+	async getChannel(_id: string): Promise<Channel | undefined> {
+		return undefined;
+	}
+	async putChannel(_channel: Channel): Promise<void> {}
+	async listNodes(): Promise<Node[]> {
+		return [];
+	}
+	async getNode(_id: string): Promise<Node | undefined> {
+		return undefined;
+	}
+	async putNode(_node: Node): Promise<void> {}
+	async bindNodeChannel(_nodeId: string, _channelId: string): Promise<Node | undefined> {
+		return undefined;
+	}
+	async listNodeRecords(_nodeId: string): Promise<NodeRecord[]> {
+		return [];
+	}
+	async putNodeRecord(_record: NodeRecord): Promise<void> {}
+	async deleteNodeRecords(_nodeId: string, _ids: readonly string[]): Promise<number> {
+		return 0;
+	}
+	async listDelegationGrants(): Promise<DelegationGrant[]> {
+		return [];
+	}
+	async putDelegationGrant(_grant: DelegationGrant): Promise<void> {}
+	async listPlanProposals(): Promise<PlanProposal[]> {
+		return [];
+	}
+	async putPlanProposal(_proposal: PlanProposal): Promise<void> {}
+	async listChannelEntries(_channelId: string, _since?: number): Promise<ChannelEntry[]> {
+		return [];
+	}
+	async searchChannelEntries(_q: string, _limit?: number, _offset?: number): Promise<ChannelSearchResult[]> {
+		return [];
+	}
+	async appendChannelEntry(entry: Omit<ChannelEntry, "seq">): Promise<ChannelEntry> {
+		return { ...entry, seq: 0 };
+	}
+	async nextChannelSeq(_channelId: string): Promise<number> {
+		return 0;
+	}
+	async listChannelMemberships(_channelId: string): Promise<ChannelMembership[]> {
+		return [];
+	}
+	async putChannelMembership(_row: ChannelMembership): Promise<void> {}
+	async getChannelReadCursor(_channelId: string, _userId: string): Promise<ChannelReadCursor | undefined> {
+		return undefined;
+	}
+	async putChannelReadCursor(_row: ChannelReadCursor): Promise<void> {}
 }
 
 class NoopDriver extends EventEmitter implements AgentDriver {
@@ -70,7 +128,7 @@ class NoopDriver extends EventEmitter implements AgentDriver {
 		return undefined;
 	}
 	async getState(): Promise<RpcSessionState> {
-		return { todoPhases: [], isStreaming: false } as RpcSessionState;
+		return { todoPhases: [], isStreaming: false } as unknown as RpcSessionState;
 	}
 	respondUi(): void {}
 	respondHostTool(): void {}

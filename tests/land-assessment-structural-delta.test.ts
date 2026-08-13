@@ -383,7 +383,8 @@ describe("determinism", () => {
 		const second = await structuralDeltaAnalyzer.run(ctx);
 
 		expect(stripObservedAt(first.observations)).toEqual(stripObservedAt(second.observations));
-		expect(stripObservedAt(first.findings)).toEqual(stripObservedAt(second.findings));
+		// AssessmentFinding carries no observedAt field (schema.ts) — nothing to strip, so compare directly.
+		expect(first.findings).toEqual(second.findings);
 		expect(first.coverage).toEqual(second.coverage);
 		// sanity: the fixture actually produced something to compare, not two empty arrays trivially equal
 		expect(first.observations.length).toBeGreaterThan(0);

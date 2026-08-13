@@ -241,7 +241,7 @@ test("verifyFeature sweeps every live member's WIP before running the gate on it
 
 	const seenDirty: (string | undefined)[] = [];
 	class FeatureManager extends SquadManager {
-		override async verifyFeature(id: string): ReturnType<SquadManager["verifyFeature"]> {
+		override async verifyFeature(id: string): ReturnType<InstanceType<typeof SquadManager>["verifyFeature"]> {
 			const out = await super.verifyFeature(id);
 			return out;
 		}

@@ -1,0 +1,15 @@
+{
+	// Concern 23 slice 2 (deepen-modules): the root test corpus (tests/, 449 files) has never been
+	// part of any tsc program — bun strips types at run time, so a drifted fixture or a deleted
+	// import passes every gate until it fails at RUNTIME (concern 18's TestManager) or never fails
+	// at all (concern 17's phantom import). This program is clause 4 of `bun run check`: the root
+	// compiler options (which already carry types:["bun"]), src + tests together so cross-imports
+	// resolve, scripts/ entries inherited from the base include.
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		// The wire-contract test imports webapp's channelTimeline, which reaches a .tsx module —
+		// the root program needs jsx set to resolve it (src/ itself has no tsx; this is inert there).
+		"jsx": "react-jsx"
+	},
+	"include": ["src", "tests", "scripts/skills-verify.ts", "scripts/post-wedge-check.ts", "scripts/backfill-receipt-attribution.ts"]
+}

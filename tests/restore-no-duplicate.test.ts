@@ -53,7 +53,7 @@ test("a record already reattached by start() is NOT re-created under a fresh id"
 	const mgr = new (class extends SquadManager {
 		created: string[] = [];
 		override async create(opts: CreateAgentOptions): Promise<AgentDTO> {
-			this.created.push(opts.name);
+			this.created.push(opts.name!);
 			return { id: `${opts.name}-fresh`, name: opts.name } as AgentDTO;
 		}
 		seedResident(p: PersistedAgent): void {
@@ -78,7 +78,7 @@ test("a record that start() did NOT reattach is still restored — the flag keep
 	const mgr = new (class extends SquadManager {
 		created: string[] = [];
 		override async create(opts: CreateAgentOptions): Promise<AgentDTO> {
-			this.created.push(opts.name);
+			this.created.push(opts.name!);
 			return { id: "gone-fresh", name: opts.name } as AgentDTO;
 		}
 	})({ stateDir } as never);
@@ -97,7 +97,7 @@ test("repeated restores do not multiply a resident record", async () => {
 	const mgr = new (class extends SquadManager {
 		created: string[] = [];
 		override async create(opts: CreateAgentOptions): Promise<AgentDTO> {
-			this.created.push(opts.name);
+			this.created.push(opts.name!);
 			return { id: `${opts.name}-${this.created.length}`, name: opts.name } as AgentDTO;
 		}
 		seedResident(p: PersistedAgent): void {

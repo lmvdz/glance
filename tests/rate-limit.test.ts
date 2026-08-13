@@ -133,7 +133,7 @@ test("pausedProviders lists only currently-capped buckets, self-clearing as wind
 	const gate = new RateLimitGate(() => now);
 	gate.note("429", 60_000, "openai");
 	gate.note("429", 5 * 60_000, "google");
-	expect(gate.pausedProviders().sort()).toEqual(["google", "openai"]);
+	expect([...gate.pausedProviders()].sort()).toEqual(["google", "openai"]);
 	now = 60_000;
 	expect(gate.pausedProviders()).toEqual(["google"]); // openai's window elapsed
 });

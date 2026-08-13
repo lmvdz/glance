@@ -196,7 +196,7 @@ describe("replay corpus: scripted history over all three sources", () => {
 		// ── temporal holdout ──
 		const split = splitCorpusAt(corpus, "2021-01-01T00:00:00.000Z");
 		expect(split.training.map((t) => t.source)).toEqual(["pr-merge"]); // 2020 mergedAt
-		expect(split.holdout.map((t) => t.source).sort()).toEqual(["ff-local-land", "merge-commit"].sort()); // both effectively "now"
+		expect(split.holdout.map((t) => t.source).sort()).toEqual(["ff-local-land", "merge-commit"].sort() as never); // both effectively "now"
 		expect(split.unknownTime).toEqual([]);
 	});
 

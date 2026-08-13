@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { bindIsInsecure } from "../src/index.ts";
+import { bindIsInsecure } from "../src/boot.ts";
 
 test("loopback binds are safe without TLS", () => {
 	expect(bindIsInsecure("127.0.0.1", false)).toBe(false);

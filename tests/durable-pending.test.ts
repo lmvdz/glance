@@ -141,11 +141,77 @@ class SpySaveStore implements Store {
 	saveCapabilities(snapshot: CapabilitySnapshot): Promise<void> {
 		return this.real.saveCapabilities(snapshot);
 	}
-	appendAudit(entry: AuditEntry): Promise<void> {
-		return this.real.appendAudit(entry);
+	appendAudit(_entry: AuditEntry): Promise<void> {
+		return this.real.appendAudit();
 	}
-	appendUsage(receipt: RunReceipt): Promise<void> {
-		return this.real.appendUsage(receipt);
+	appendUsage(_receipt: RunReceipt): Promise<void> {
+		return this.real.appendUsage();
+	}
+	async listChannels() {
+		return this.real.listChannels();
+	}
+	async getChannel(id: string) {
+		return this.real.getChannel(id);
+	}
+	async putChannel(channel: Parameters<Store["putChannel"]>[0]) {
+		return this.real.putChannel(channel);
+	}
+	async listNodes() {
+		return this.real.listNodes();
+	}
+	async getNode(id: string) {
+		return this.real.getNode(id);
+	}
+	async putNode(node: Parameters<Store["putNode"]>[0]) {
+		return this.real.putNode(node);
+	}
+	async bindNodeChannel(nodeId: string, channelId: string) {
+		return this.real.bindNodeChannel(nodeId, channelId);
+	}
+	async listNodeRecords(nodeId: string) {
+		return this.real.listNodeRecords(nodeId);
+	}
+	async putNodeRecord(record: Parameters<Store["putNodeRecord"]>[0]) {
+		return this.real.putNodeRecord(record);
+	}
+	async deleteNodeRecords(nodeId: string, ids: readonly string[]) {
+		return this.real.deleteNodeRecords(nodeId, ids);
+	}
+	async listDelegationGrants() {
+		return this.real.listDelegationGrants();
+	}
+	async putDelegationGrant(grant: Parameters<Store["putDelegationGrant"]>[0]) {
+		return this.real.putDelegationGrant(grant);
+	}
+	async listPlanProposals() {
+		return this.real.listPlanProposals();
+	}
+	async putPlanProposal(proposal: Parameters<Store["putPlanProposal"]>[0]) {
+		return this.real.putPlanProposal(proposal);
+	}
+	async listChannelEntries(channelId: string, since?: number) {
+		return this.real.listChannelEntries(channelId, since);
+	}
+	async searchChannelEntries(q: string, limit?: number, offset?: number) {
+		return this.real.searchChannelEntries?.(q, limit, offset) ?? [];
+	}
+	async appendChannelEntry(entry: Parameters<Store["appendChannelEntry"]>[0]) {
+		return this.real.appendChannelEntry(entry);
+	}
+	async nextChannelSeq(channelId: string) {
+		return this.real.nextChannelSeq(channelId);
+	}
+	async listChannelMemberships(channelId: string) {
+		return this.real.listChannelMemberships(channelId);
+	}
+	async putChannelMembership(row: Parameters<Store["putChannelMembership"]>[0]) {
+		return this.real.putChannelMembership(row);
+	}
+	async getChannelReadCursor(channelId: string, userId: string) {
+		return this.real.getChannelReadCursor(channelId, userId);
+	}
+	async putChannelReadCursor(row: Parameters<Store["putChannelReadCursor"]>[0]) {
+		return this.real.putChannelReadCursor(row);
 	}
 }
 

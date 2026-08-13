@@ -23,7 +23,7 @@ class ControlDriver extends EventEmitter implements AgentDriver {
 	async stop(): Promise<void> {}
 	async prompt(): Promise<void> {}
 	async abort(): Promise<unknown> { return undefined; }
-	async getState(): Promise<RpcSessionState> { return { todoPhases: [], isStreaming: false } as RpcSessionState; }
+	async getState(): Promise<RpcSessionState> { return { todoPhases: [], isStreaming: false } as unknown as RpcSessionState; }
 	respondUi(): void {}
 	respondHostTool(): void {}
 }
@@ -49,7 +49,7 @@ interface InternalHost {
 	emitUnitTranscriptEvent(id: string | undefined, kind: string, text: string, payload: unknown): void;
 }
 
-function isEventPayload(value: unknown): value is { refs: { unitId: string; entryId?: string; planId?: string; planPath?: string; candidateId?: string }; doorSurface: string; face: { unitId: string; unitName: string; pendingStatus?: string; pendingId?: string; eventKind?: string; title?: string; concernCount?: number; pinned?: Record<string, unknown> } } {
+function isEventPayload(value: unknown): value is { refs: { unitId: string; entryId?: string; planId?: string; planPath?: string; candidateId?: string }; doorSurface: string; face: { unitId: string; unitName: string; pendingStatus?: string; pendingId?: string; eventKind?: string; title?: string; concernCount?: number; pinned?: Record<string, unknown>; body?: string; tone?: string; detail?: string; eyebrow?: string; accountableHuman?: string } } {
 	return Boolean(value && typeof value === "object" && "refs" in value && "doorSurface" in value && "face" in value);
 }
 
@@ -140,8 +140,8 @@ test("mention steer echo is authored from resolved target, not client echo prove
 	});
 	// Exactly one echo, and it is not ALSO in the room: the point of moving it was to stop the room
 	// restating what the person just typed there.
-	expect((await mgr.channelEntries(`node:${dto.id}`)).filter((candidate) => candidate.event?.kind === "mention-steer")).toHaveLength(1);
-	expect((await mgr.channelEntries("ops")).filter((candidate) => candidate.event?.kind === "mention-steer")).toHaveLength(0);
+	expect((await mgr.channelEntries(`node:${dto.id}`, 0, LOCAL_ACTOR)).filter((candidate) => candidate.event?.kind === "mention-steer")).toHaveLength(1);
+	expect((await mgr.channelEntries("ops", 0, LOCAL_ACTOR)).filter((candidate) => candidate.event?.kind === "mention-steer")).toHaveLength(0);
 	await mgr.stop();
 });
 
@@ -173,7 +173,7 @@ test("automation-sourced prompt does not return-emit", async () => {
 
 	await mgr.applyCommand({ type: "prompt", id: dto.id, message: "heartbeat", source: "auto" }, LOCAL_ACTOR);
 
-	expect((await mgr.channelEntries("ops")).filter((entry) => entry.event?.kind === TRANSCRIPT_EVENT_RETURN_EMIT)).toHaveLength(0);
+	expect((await mgr.channelEntries("ops", 0, LOCAL_ACTOR)).filter((entry) => entry.event?.kind === TRANSCRIPT_EVENT_RETURN_EMIT)).toHaveLength(0);
 	await mgr.stop();
 });
 
@@ -221,7 +221,7 @@ test("routine lifecycle cards land at the unit node, not its origin channel", as
 	expect(card.authorActor).toBe("manager");
 	expect(card.event?.issuer).toBe("manager");
 	expect(card.channelId).toBe(nodeChannelId);
-	expect((await mgr.channelEntries("room-a")).some((entry) => entry.event?.kind === TRANSCRIPT_EVENT_LAND_ASSESSMENT)).toBe(false);
+	expect((await mgr.channelEntries("room-a", 0, LOCAL_ACTOR)).some((entry) => entry.event?.kind === TRANSCRIPT_EVENT_LAND_ASSESSMENT)).toBe(false);
 	expect(card.text).toBe("land assessment · rejected");
 	expect(card.text).not.toContain("sk-");
 	expect(isEventPayload(card.event?.payload)).toBe(true);
@@ -247,7 +247,7 @@ test("unbound units retain routine cards at their node and escalate gate verdict
 
 	expect(routineCard.channelId).toBe(nodeChannelId);
 	expect(escalationCard.channelId).toBe(DEFAULT_CHANNEL_ID);
-	expect((await mgr.channelEntries(DEFAULT_CHANNEL_ID)).some((entry) => entry.event?.kind === TRANSCRIPT_EVENT_LAND_ASSESSMENT)).toBe(false);
+	expect((await mgr.channelEntries(DEFAULT_CHANNEL_ID, 0, LOCAL_ACTOR)).some((entry) => entry.event?.kind === TRANSCRIPT_EVENT_LAND_ASSESSMENT)).toBe(false);
 	await mgr.stop();
 });
 
@@ -269,8 +269,8 @@ test("child telemetry stays on the child node while escalation alone reaches fle
 	host.emitUnitTranscriptEvent(child.id, "needs-you", "needs you", {});
 	await Promise.all([...await childEvents, await needsYou]);
 
-	expect((await mgr.channelEntries(`node:${parent.id}`)).some((entry) => entry.event?.kind === TRANSCRIPT_EVENT_UNIT_TURN_FINISHED)).toBe(false);
-	expect((await mgr.channelEntries(DEFAULT_CHANNEL_ID)).some((entry) => entry.event?.kind === TRANSCRIPT_EVENT_UNIT_TURN_FINISHED)).toBe(false);
+	expect((await mgr.channelEntries(`node:${parent.id}`, 0, LOCAL_ACTOR)).some((entry) => entry.event?.kind === TRANSCRIPT_EVENT_UNIT_TURN_FINISHED)).toBe(false);
+	expect((await mgr.channelEntries(DEFAULT_CHANNEL_ID, 0, LOCAL_ACTOR)).some((entry) => entry.event?.kind === TRANSCRIPT_EVENT_UNIT_TURN_FINISHED)).toBe(false);
 	await mgr.stop();
 });
 
@@ -376,8 +376,8 @@ test("projection is scoped to the manager org store", async () => {
 
 	a.host.emitUnitTranscriptEvent(dto.id, TRANSCRIPT_EVENT_GATE_VERDICT, "gate verdict · pass", { verdict: "pass" });
 	await projected;
-	expect((await a.mgr.channelEntries("ops")).map((entry) => entry.event?.kind)).toContain(TRANSCRIPT_EVENT_GATE_VERDICT);
-	expect(await b.mgr.channelEntries("ops")).toHaveLength(0);
+	expect((await a.mgr.channelEntries("ops", 0, LOCAL_ACTOR)).map((entry) => entry.event?.kind)).toContain(TRANSCRIPT_EVENT_GATE_VERDICT);
+	expect(await b.mgr.channelEntries("ops", 0, LOCAL_ACTOR)).toHaveLength(0);
 	await a.mgr.stop();
 	await b.mgr.stop();
 });
@@ -396,10 +396,10 @@ test("routine tool approvals never become room cards — only gate-class pending
 	// Raise it, then resolve it. The lane and rail read AgentDTO.pending directly and are untouched by
 	// this change; what must not happen is a permanent card — on either edge of the lifecycle.
 	host.onUi(rec, { method: "confirm", id: "acpui_7", title: "Allow tool: bash", message: "Command: bun run check" } as RpcExtensionUIRequest);
-	expect(await mgr.channelEntries("ops")).toEqual([]);
+	expect(await mgr.channelEntries("ops", 0, LOCAL_ACTOR)).toEqual([]);
 	await mgr.applyCommand({ type: "answer", id: dto.id, requestId: "acpui_7", value: "yes" }, LOCAL_ACTOR);
 	expect(mgr.getAgent(dto.id)?.pending).toEqual([]);
-	expect(await mgr.channelEntries("ops")).toEqual([]);
+	expect(await mgr.channelEntries("ops", 0, LOCAL_ACTOR)).toEqual([]);
 
 	// A gate-class request — the kind no supervisor may auto-answer — still earns its card.
 	const gateCard = waitForChannelEntry(mgr, "ops", (entry) => entry.event?.kind === "needs-you");
@@ -429,7 +429,7 @@ test("a private room's escalations never reach org-public #fleet", async () => {
 
 	expect(card.channelId).toBe("war-room");
 	// Nothing about the private unit is legible from the org-public room.
-	const fleet = await mgr.channelEntries(DEFAULT_CHANNEL_ID);
+	const fleet = await mgr.channelEntries(DEFAULT_CHANNEL_ID, 0, LOCAL_ACTOR);
 	expect(fleet.some((entry) => entry.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT)).toBe(false);
 	expect(fleet.some((entry) => entry.text.includes("embargoed"))).toBe(false);
 	expect(fleet.some((entry) => entry.text.includes("unit-private"))).toBe(false);
@@ -445,20 +445,49 @@ test("a NAMED accountable human reaches the card headline; an unnamed operator d
 	// Concern 19 asks for one named accountable human. In file mode the operator id is literally
 	// "local", and "local is accountable" names nobody while lengthening every headline to say it. An
 	// identifier that identifies no one is worse than silence, because it reads like an answer.
-	const { mgr, host, repo } = await makeMgr("projection-accountable");
 	const named = { id: "db:lars", displayName: "Lars", origin: "local" as const, role: "admin" as const };
+	const repo = await makeRepo("projection-accountable-repo-");
+	const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "projection-accountable-state-"));
+	const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "projection-accountable-wt-"));
+	tmps.push(stateDir, worktreeBase);
+	const mgr = new SquadManager({ stateDir, worktreeBase, operator: named });
+	await mgr.start();
+	const host = mgr as unknown as InternalHost;
+	host.makeDriver = () => new ControlDriver();
 	const dto = await mgr.create({ name: "unit-named", repo, approvalMode: "yolo", autoRoute: false });
 	const rec = host.agents.get(dto.id);
 	if (!rec) throw new Error("missing record");
 
 	const card = waitForChannelEntry(mgr, DEFAULT_CHANNEL_ID, (entry) => entry.event?.kind === "needs-you");
-	host.onUi(rec, { method: "confirm", id: "gate_named", title: "Ship it?", message: "3 services" } as RpcExtensionUIRequest, named);
+	host.onUi(rec, { method: "confirm", id: "gate_named", title: "Ship it?", message: "3 services" } as RpcExtensionUIRequest);
 	const opened = await card;
 	if (!isEventPayload(opened.event?.payload)) throw new Error("bad payload");
-	// Whether or not this deployment names its operator, the id is on the payload for anyone who can
-	// resolve it — the headline is a rendering decision, not the record.
-	expect(String(JSON.stringify(opened.event.payload))).toContain("accountableHuman");
+	// The CONTRACT, not just the field's existence (codex M, concern 23 round): a named operator's
+	// id rides the payload AND transforms the headline — dropping either regresses concern 19.
+	expect(opened.event.payload.face.accountableHuman).toBe("db:lars");
+	expect(opened.event.payload.face.title).toBe("Needs you · Ship it? — db:lars is accountable.");
 	await mgr.stop();
+
+	// The unnamed control the test's own title promises: file mode's literal "local" names nobody —
+	// the headline stays bare (an identifier that identifies no one reads like an answer), while the
+	// id still rides the payload for anyone who can resolve it.
+	const localStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "projection-accountable-local-"));
+	const localWtBase = await fs.mkdtemp(path.join(os.tmpdir(), "projection-accountable-lwt-"));
+	tmps.push(localStateDir, localWtBase);
+	const localMgr = new SquadManager({ stateDir: localStateDir, worktreeBase: localWtBase });
+	await localMgr.start();
+	const localHost = localMgr as unknown as InternalHost;
+	localHost.makeDriver = () => new ControlDriver();
+	const localDto = await localMgr.create({ name: "unit-local", repo, approvalMode: "yolo", autoRoute: false });
+	const localRec = localHost.agents.get(localDto.id);
+	if (!localRec) throw new Error("missing record");
+	const localCard = waitForChannelEntry(localMgr, DEFAULT_CHANNEL_ID, (entry) => entry.event?.kind === "needs-you");
+	localHost.onUi(localRec, { method: "confirm", id: "gate_local", title: "Ship it?", message: "3 services" } as RpcExtensionUIRequest);
+	const localOpened = await localCard;
+	if (!isEventPayload(localOpened.event?.payload)) throw new Error("bad payload");
+	expect(localOpened.event.payload.face.title).toBe("Needs you · Ship it?");
+	expect(localOpened.event.payload.face.title).not.toContain("accountable");
+	await localMgr.stop();
 });
 
 test("a steer that arrived from OUTSIDE the room still reaches the room", async () => {

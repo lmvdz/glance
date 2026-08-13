@@ -82,7 +82,7 @@ function seedAgent(mgr: SquadManager, id: string, repo: string, worktree: string
 		messageCount: 0,
 	};
 	const options: PersistedAgent = { id, name: id, repo, worktree, approvalMode: "yolo" };
-	mgr.agents.set(id, { dto, agent: undefined as never, options, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() });
+	mgr.agents.set(id, { dto, agent: undefined as never, options, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() });
 }
 
 test("REGRESSION: a retryable dirty-main refusal records a `blocked` model outcome — the statistic must never be re-coupled to !retryable", async () => {

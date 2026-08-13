@@ -146,7 +146,7 @@ test("createPlaneIssue deep-links to the app host, not the API base host", async
 
 		// OMPSQ-31: the deep link points at the app host, never the API base host.
 		expect(ref?.url).toBe("https://app.acme.test/acme/projects/proj-9/issues/iss-1");
-		expect(ref?.url.includes(`127.0.0.1:${server.port}`)).toBe(false);
+		expect(ref?.url?.includes(`127.0.0.1:${server.port}`)).toBe(false);
 	} finally {
 		server.stop(true);
 	}

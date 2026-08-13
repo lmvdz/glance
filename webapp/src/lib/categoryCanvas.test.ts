@@ -18,7 +18,6 @@ import type { Task } from "../types";
 
 function task(overrides: Partial<Task> & { id: string }): Task {
   return {
-    id: overrides.id,
     title: overrides.title ?? overrides.id,
     category: overrides.category ?? "frontend",
     duration: "1a",

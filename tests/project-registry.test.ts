@@ -346,7 +346,6 @@ test("after a write failure the in-memory set matches DISK, not a guessed rollba
 // Live finding 2026-07-15: a literal-tilde repo path ("~/sui/omp-graph") survived registration,
 // rode into an agent's spawn cwd, and ENOENT-looped the console agent for an afternoon — shells
 // expand ~, nothing else does.
-import * as os from "node:os";
 import { expandHomePath } from "../src/project-registry.ts";
 
 test("normalizeRepoPath expands a leading ~ so the tilde form and absolute form collapse to one key", () => {

@@ -95,7 +95,7 @@ class NoopDriver extends EventEmitter implements AgentDriver {
 		return Promise.resolve();
 	}
 	getState(): Promise<RpcSessionState> {
-		return Promise.resolve({ todoPhases: [], isStreaming: false } as RpcSessionState);
+		return Promise.resolve({ todoPhases: [], isStreaming: false } as unknown as RpcSessionState);
 	}
 	respondUi(): void {}
 	respondHostTool(): void {}

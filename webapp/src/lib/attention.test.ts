@@ -52,7 +52,7 @@ test('reportAttention: POSTs to /api/attention with the given event as JSON', as
   globalThis.fetch = (async (url: string, init?: RequestInit) => {
     calls.push({ url: String(url), init });
     return { ok: true, status: 200, json: async () => ({ ok: true }) } as unknown as Response;
-  }) as typeof fetch;
+  }) as unknown as typeof fetch;
   try {
     reportAttention({ kind: 'diff-viewed', repo: '/srv/app', file: 'a.ts', agentId: 'u1' });
     await Promise.resolve(); // let the fire-and-forget microtask run
@@ -67,7 +67,7 @@ test('reportAttention: POSTs to /api/attention with the given event as JSON', as
 
 test('reportAttention: a rejected/failed request never throws or rejects — swallowed', async () => {
   const original = globalThis.fetch;
-  globalThis.fetch = (async () => ({ ok: false, status: 400, text: async () => 'unknown repo' }) as unknown as Response) as typeof fetch;
+  globalThis.fetch = (async () => ({ ok: false, status: 400, text: async () => 'unknown repo' }) as unknown as Response) as unknown as typeof fetch;
   try {
     expect(() => reportAttention({ kind: 'diff-viewed', repo: '/other' })).not.toThrow();
     await Promise.resolve();
@@ -81,7 +81,7 @@ test('reportAttention: a network-level throw is also swallowed', async () => {
   const original = globalThis.fetch;
   globalThis.fetch = (async () => {
     throw new Error('network down');
-  }) as typeof fetch;
+  }) as unknown as typeof fetch;
   try {
     expect(() => reportAttention({ kind: 'surprise', repo: '/srv/app', file: 'a.ts' })).not.toThrow();
     await Promise.resolve();
@@ -247,7 +247,7 @@ test('reportAnswerRead: POSTs an answer-read event with repo and answerId', asyn
   globalThis.fetch = (async (url: string, init?: RequestInit) => {
     calls.push({ url: String(url), init });
     return { ok: true, status: 200, json: async () => ({ ok: true }) } as unknown as Response;
-  }) as typeof fetch;
+  }) as unknown as typeof fetch;
   try {
     reportAnswerRead('/srv/app', 'answer-123');
     await Promise.resolve();

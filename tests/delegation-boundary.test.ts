@@ -100,7 +100,7 @@ test("an unclassified action is refused, not permitted — nobody-decided is not
 test("a rule that names a non-delegatable action is refused at creation, not at invocation", async () => {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "delegation-rules-"));
 	const store = new FileStore(dir);
-	await store.putNode({ id: "n1", kind: "unit", title: "unit", state: "working", createdAt: 1, channelId: null });
+	await store.putNode({ id: "n1", kind: "unit", title: "unit", state: "working", createdAt: 1, channelId: undefined });
 	const records = new NodeRecordStore(store);
 	const rule = {
 		kind: "rule" as const,

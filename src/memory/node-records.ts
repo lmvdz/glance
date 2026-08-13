@@ -1,5 +1,5 @@
 import { Result, Schema } from "effect";
-import type { Store } from "../dal/store.ts";
+import type { GraphBackend } from "../dal/store.ts";
 import { nonDelegatableClassOf, nonDelegatableClasses, type NonDelegatableClass } from "../delegation-boundary.ts";
 
 /**
@@ -316,7 +316,7 @@ export function readNodeRecord(value: unknown): NodeRecord | undefined {
 
 export class NodeRecordStore {
 	constructor(
-		private readonly store: Store,
+		private readonly store: GraphBackend,
 		private readonly log: (message: string) => void = () => {},
 	) {}
 

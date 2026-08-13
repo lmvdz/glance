@@ -524,8 +524,8 @@ describe('allFilesColdStart', () => {
 test('two repos sharing their trailing two path segments get distinct qualified roots (code-review finding 7)', () => {
   const tree = buildHeatTree(
     [
-      { id: 'src/x.ts', daily: [1], total: 1, agentCount: 0, repo: '/home/a/sui/omp-squad' },
-      { id: 'src/x.ts', daily: [2], total: 2, agentCount: 0, repo: '/home/b/sui/omp-squad' },
+      { id: 'src/x.ts', heat: [1], repo: '/home/a/sui/omp-squad' },
+      { id: 'src/x.ts', heat: [2], repo: '/home/b/sui/omp-squad' },
     ],
     1,
   );

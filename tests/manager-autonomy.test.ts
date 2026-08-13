@@ -103,7 +103,7 @@ function seed(mgr: TestManager, id: string, issue?: IssueRef): FakeDriver {
 		issue,
 	};
 	const options: PersistedAgent = { id, name: id, repo: "/r", worktree: "/r", approvalMode: "yolo", issue };
-	mgr.agents.set(id, { dto, agent, options, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() });
+	mgr.agents.set(id, { dto, agent, options, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() } as never);
 	return agent;
 }
 

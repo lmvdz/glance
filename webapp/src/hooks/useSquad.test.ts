@@ -30,10 +30,10 @@ describe("normalizeCapabilities", () => {
       sources: [{ id: "s1" }],
       packs: [{ id: "p1" }, { id: "p2" }],
       installs: [{ id: "i1" }],
-    } as never;
-    const out = normalizeCapabilities(good);
+    };
+    const out = normalizeCapabilities(good as never);
     expect(out.packs.length).toBe(2);
-    expect(out.sources).toBe(good.sources);
+    expect(out.sources).toBe(good.sources as never);
   });
 });
 
@@ -47,7 +47,7 @@ describe("normalizeCapabilities", () => {
 describe("normalizeCatalog", () => {
   test("unwraps the { catalog } envelope", () => {
     const rows = [{ id: "c1" }, { id: "c2" }];
-    expect(normalizeCatalog({ catalog: rows })).toBe(rows);
+    expect(normalizeCatalog({ catalog: rows })).toBe(rows as never);
   });
 
   test("falls back to [] for a missing/empty/partial body", () => {
@@ -58,7 +58,7 @@ describe("normalizeCatalog", () => {
 
   test("tolerates a bare array (drifted shape) by passing it through", () => {
     const rows = [{ id: "c1" }];
-    expect(normalizeCatalog(rows)).toBe(rows);
+    expect(normalizeCatalog(rows)).toBe(rows as never);
   });
 
   test("coerces a non-array catalog field to []", () => {

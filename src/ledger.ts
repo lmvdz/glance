@@ -130,6 +130,26 @@ export function mapFile<T>(stateDir: string, fileName: string): MapFile<T> {
 	};
 }
 
+/** Strict variant of `mapFile` for CONTROL ledgers — files whose contents GATE decisions or are
+ *  mutated by audited operator verbs (issue-attempts), as opposed to record-only telemetry.
+ *  Missing file ⇒ `{}` (a ledger that never existed is genuinely empty); unreadable or corrupt
+ *  ⇒ THROWS — collapsing a disk fault to `{}` turns it into a false all-clear (codex finding,
+ *  deepen 14 recovery). Writes propagate failures for the same reason: an operator verb whose
+ *  write silently vanished must not report success. */
+export function mapFileStrict<T>(stateDir: string, fileName: string): MapFile<T> {
+	const file = path.join(stateDir, fileName);
+	return {
+		read: () => {
+			const b = getStorageBackend();
+			if (!b.exists(file)) return {};
+			const raw = b.readTextSync(file);
+			if (raw === undefined) throw new Error(`${fileName}: exists but is unreadable`);
+			return decodeRecord<T>(JSON.parse(raw));
+		},
+		write: (all) => getStorageBackend().writeDurableSync(file, JSON.stringify(all)),
+	};
+}
+
 export interface ListFileOptions {
 	/** Retention guard (FIELD-1): drop-oldest above this many entries… */
 	maxEntries?: number;

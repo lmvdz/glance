@@ -68,7 +68,7 @@ class NoopDriver extends EventEmitter implements AgentDriver {
 		return undefined;
 	}
 	async getState(): Promise<RpcSessionState> {
-		return { todoPhases: [], isStreaming: false } as RpcSessionState;
+		return { todoPhases: [], isStreaming: false } as unknown as RpcSessionState;
 	}
 	respondUi(): void {}
 	respondHostTool(): void {}
@@ -98,7 +98,7 @@ function terminalWorkflowRecord(id: string, repo: string, worktree: string): Per
 			visits: { escalate: 2 },
 			vars: {},
 			index: 4,
-			coldReentryCount: 0,
+			resumeAttempts: 0,
 			rollup: [],
 			terminal: { reason: 'node "escalate" exceeded its visit cap (2)', at: Date.now(), forkPoint: { runId: "run-1", seq: 4 } },
 		},

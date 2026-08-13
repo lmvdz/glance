@@ -41,6 +41,7 @@ import {
 	TRANSCRIPT_EVENT_VERIFICATION_RAN,
 	TRANSCRIPT_EVENT_VOICE_CALL,
 	TRANSCRIPT_EVENT_VOICE_DECISION,
+	TRANSCRIPT_EVENT_VOICE_FLEET_ACTION,
 	type TranscriptEventKind,
 } from "../src/transcript-event-kinds.ts";
 
@@ -136,6 +137,22 @@ const FIXTURES: Record<TranscriptEventKind, unknown> = {
 			optionLabels: ["Keep it", "Rename to session.ts"],
 			tone: "warning",
 			register: "claim",
+		},
+	},
+	// Mirrors the REAL emit site (voice-call-manager.ts announceFleetAction, grok F1): tool ids are
+	// the fleet_* set (voice-fleet.ts VOICE_FLEET_TOOLS) and the title comes from
+	// fleetActionCardTitle — "Voice: <summary>" for a relayed action, never free-form prose.
+	[TRANSCRIPT_EVENT_VOICE_FLEET_ACTION]: {
+		refs: { callId: "call-7-8790", unitId: "room-16" },
+		face: {
+			title: "Voice: steer room-16 toward the failing gate",
+			status: "relayed",
+			tone: "info",
+			register: "claim",
+			callId: "call-7-8790",
+			tool: "fleet_steer",
+			actionStatus: "relayed",
+			unitId: "room-16",
 		},
 	},
 };

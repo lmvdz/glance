@@ -16,7 +16,7 @@ import {
 
 // Minimal agent stub — only the fields the pure derivations read.
 function agent(over: Partial<AgentDTO>): AgentDTO {
-  return { status: 'working', pending: [], ...(over as object) } as AgentDTO;
+  return { status: 'working', pending: [], ...(over as object) } as unknown as AgentDTO;
 }
 
 describe('whyStopped', () => {

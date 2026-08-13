@@ -21,9 +21,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentDriver } from "../src/agent-driver.ts";
+import { LOCAL_ACTOR } from "../src/federation.ts";
 import { openGoalOverlapLedger } from "../src/goal-overlap-ledger.ts";
 import { SquadManager } from "../src/squad-manager.ts";
-import type { PersistedAgent } from "../src/types.ts";
+import type { PersistedAgent, RpcSessionState } from "../src/types.ts";
 
 process.env.OMP_SQUAD_AUTODISPATCH = "0";
 
@@ -41,8 +42,8 @@ class ReadyDriver extends EventEmitter implements AgentDriver {
 	async abort(): Promise<unknown> {
 		return undefined;
 	}
-	async getState(): Promise<unknown> {
-		return {};
+	async getState(): Promise<RpcSessionState> {
+		return {} as unknown as RpcSessionState;
 	}
 	respondUi(): void {}
 	respondHostTool(): void {}
@@ -59,7 +60,7 @@ class FailStartDriver extends EventEmitter implements AgentDriver {
 	async abort(): Promise<unknown> {
 		return undefined;
 	}
-	async getState(): never {
+	async getState(): Promise<never> {
 		throw new Error("unused in failed-start path");
 	}
 	respondUi(): void {}
@@ -128,7 +129,7 @@ test("restart-idempotency: a resumed deterministic-id pair discloses once, never
 	});
 	expect(candidate1.status).not.toBe("error");
 
-	const cardsFirstBoot = (await mgr1.channelEntries("fleet")).filter((e) => e.event?.kind === "goal-overlap");
+	const cardsFirstBoot = (await mgr1.channelEntries("fleet", 0, LOCAL_ACTOR)).filter((e) => e.event?.kind === "goal-overlap");
 	expect(cardsFirstBoot).toHaveLength(1);
 	expect(cardsFirstBoot[0]!.text).toContain("owner-unit");
 	// The ledger durably records the pair by the units' REAL ids, not their display names.
@@ -160,7 +161,7 @@ test("restart-idempotency: a resumed deterministic-id pair discloses once, never
 		bypassCap: true,
 	});
 
-	const cardsSecondBoot = (await mgr2.channelEntries("fleet")).filter((e) => e.event?.kind === "goal-overlap");
+	const cardsSecondBoot = (await mgr2.channelEntries("fleet", 0, LOCAL_ACTOR)).filter((e) => e.event?.kind === "goal-overlap");
 	// STILL exactly one — the restart discloses nothing new for a pair it already announced.
 	expect(cardsSecondBoot).toHaveLength(1);
 	await mgr2.stop();
@@ -183,7 +184,7 @@ test("dead-unit suppression: a candidate whose start() fails never gets a goal-o
 	const failed = await mgr.create({ name: "new-team", repo, approvalMode: "yolo", task: "Implement rate limiting" });
 	expect(failed.status).toBe("error");
 
-	const cards = (await mgr.channelEntries("fleet")).filter((e) => e.event?.kind === "goal-overlap");
+	const cards = (await mgr.channelEntries("fleet", 0, LOCAL_ACTOR)).filter((e) => e.event?.kind === "goal-overlap");
 	// A conflict with a unit that never actually started is noise, not news.
 	expect(cards).toHaveLength(0);
 	await mgr.stop();
@@ -214,8 +215,8 @@ class OwnerRemovingDriver extends EventEmitter implements AgentDriver {
 	async abort(): Promise<unknown> {
 		return undefined;
 	}
-	async getState(): Promise<unknown> {
-		return {};
+	async getState(): Promise<RpcSessionState> {
+		return {} as unknown as RpcSessionState;
 	}
 	respondUi(): void {}
 	respondHostTool(): void {}
@@ -241,7 +242,7 @@ test("dead-unit suppression: an owner that settles WHILE the candidate is still 
 	expect(second.status).not.toBe("error");
 	expect(mgr.getAgent(owner.id)).toBeUndefined(); // sanity: the removal actually happened
 
-	const cards = (await mgr.channelEntries("fleet")).filter((e) => e.event?.kind === "goal-overlap");
+	const cards = (await mgr.channelEntries("fleet", 0, LOCAL_ACTOR)).filter((e) => e.event?.kind === "goal-overlap");
 	// The owner settled before the card would have posted — nothing left to warn anyone about.
 	expect(cards).toHaveLength(0);
 	await mgr.stop();

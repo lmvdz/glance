@@ -306,7 +306,7 @@ test("SquadManager.land(): a stale-probe FAILURE records `blocked` (never `rejec
 		};
 		const options = { id, name: id, repo, worktree, approvalMode: "yolo" as const };
 		// biome-ignore lint: mirrors land-blocked-recording.test.ts's seedAgent exactly
-		mgr.agents.set(id, { dto, agent: undefined as never, options, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() });
+		mgr.agents.set(id, { dto, agent: undefined as never, options, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() } as never);
 	}
 
 	// `force:true` also flips `staleGate: !force` off in SquadManager.land() (a human override clears

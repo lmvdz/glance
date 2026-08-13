@@ -157,7 +157,7 @@ describe('palette navigation destinations', () => {
       const href = paletteNavigationHref(row.view);
       expect(href).toBeDefined();
       const route = parseHubHash(href!);
-      expect(canonicalHubHash(route)).toBe(href);
+      expect(canonicalHubHash(route)).toBe(href!);
     }
   });
 
@@ -174,7 +174,7 @@ describe('palette navigation destinations', () => {
     for (const { appView, workbenchView } of cases) {
       const route = parseHubHash(paletteNavigationHref(appView)!);
       expect(route.kind).toBe('workbench');
-      expect(route.kind === 'workbench' && route.view).toBe(workbenchView);
+      expect(route.kind === 'workbench' && route.view).toBe(workbenchView as never);
     }
   });
 });

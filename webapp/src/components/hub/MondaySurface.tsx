@@ -1,5 +1,5 @@
 import React from 'react';
-import { apiJson, fetchEpisodes, type EpisodeMetaDTO } from '../../lib/api';
+import { apiFetch, apiJson, fetchEpisodes, type EpisodeMetaDTO } from '../../lib/api';
 import { useTaskContext } from '../../context/TaskContext';
 import { buildAdoptionView, coerceAdoptionCounters, coerceFrictionEntries, type AdoptionView, type FrictionEntryWire } from '../../lib/adoption-view';
 import { NOTHING_RECORDED_LINE, direction, frictionGroups, frictionHeadline, frictionWeight, nothingRecorded } from '../../lib/mondaySurface';
@@ -32,6 +32,10 @@ export function MondaySurface() {
   const [view, setView] = React.useState<AdoptionView | undefined>();
   const [friction, setFriction] = React.useState<FrictionEntryWire[] | undefined>();
   const [horizon, setHorizon] = React.useState<HorizonCurveWire | undefined>();
+  const [starved, setStarved] = React.useState<Array<{ issueId: string; identifier?: string; repo?: string; attempts: number; fails: number }>>([]);
+  const [starvedFailed, setStarvedFailed] = React.useState(false);
+  const [clearing, setClearing] = React.useState<string | undefined>();
+  const [clearFailed, setClearFailed] = React.useState<string | undefined>();
   const [episodes, setEpisodes] = React.useState<EpisodeMetaDTO[]>([]);
   const [error, setError] = React.useState('');
 
@@ -48,6 +52,11 @@ export function MondaySurface() {
       else setFriction([]);
       if (curve.status === 'fulfilled') setHorizon(coerceHorizonCurve(curve.value));
     });
+    // A failed read is a failed read, never "no starvation" (the horizon-curve honesty rule):
+    // in apply mode a hidden verdict would mean silently deferred work with no visible remedy.
+    apiJson<{ starved?: Array<{ issueId: string; identifier?: string; repo?: string; attempts: number; fails: number }> }>('/api/issues/starved')
+      .then((r) => { if (alive && Array.isArray(r.starved)) setStarved(r.starved); })
+      .catch(() => { if (alive) setStarvedFailed(true); });
     return () => { alive = false; };
   }, []);
 
@@ -95,6 +104,50 @@ export function MondaySurface() {
             ))}
           </div>
         )}
+
+        {starvedFailed ? (
+          <div className="mt-8 px-3.5 py-2.5 text-[12px]" style={{ border: '1px solid #241A17', borderLeft: '2px solid #B4553A', background: '#100D0C', color: '#DEDEE2', maxWidth: 720 }}>
+            The starved-work read failed — that is a failed read, not an all-clear. Deferred issues may exist without showing here.
+          </div>
+        ) : null}
+        {starved.length > 0 ? (
+          <div className="mt-8" style={{ borderTop: '1px solid #1F1F22', paddingTop: 22 }}>
+            <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: '.14em', color: '#5A5A61' }}>WORK THE FLEET KEEPS FAILING</div>
+            {/* deepen 14: every judged attempt on these issues failed — auto-dispatch is deferred.
+                The button IS the audited clear verb (a generation reset), not a retry. */}
+            <div className="mt-2.5 flex flex-col">
+              {starved.map((s0) => (
+                <div key={s0.issueId} className="flex items-baseline gap-3 py-2.5" style={{ borderTop: '1px solid #17171A' }}>
+                  <div className="min-w-0 flex-1 text-[12.5px] leading-[1.5]" style={{ color: '#DEDEE2', textWrap: 'pretty' }}>
+                    {s0.identifier ?? s0.issueId}: {s0.fails}/{s0.attempts} dispatch attempts failed — re-scope it, or clear to let auto-dispatch try again.
+                  </div>
+                  <button
+                    type="button"
+                    disabled={clearing === s0.issueId}
+                    onClick={() => {
+                      setClearing(s0.issueId);
+                      setClearFailed(undefined);
+                      apiFetch(`/api/issues/${encodeURIComponent(s0.issueId)}/redispatch`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reason: 'cleared from MondaySurface' }) })
+                        .then((r) => {
+                          // The row leaves ONLY on a server-confirmed clear; a 403 (viewer role),
+                          // 404, or 500 keeps the verdict visible and says why (codex finding).
+                          if (r.ok) setStarved((prev) => prev.filter((x) => x.issueId !== s0.issueId));
+                          else setClearFailed(`${s0.identifier ?? s0.issueId}: clear refused (${r.status}${r.status === 403 ? ' — operator role required' : ''})`);
+                        })
+                        .catch(() => setClearFailed(`${s0.identifier ?? s0.issueId}: clear failed — network error`))
+                        .finally(() => setClearing(undefined));
+                    }}
+                    className="flex-none px-2.5 py-1 text-[11px]"
+                    style={{ fontFamily: MONO, border: '1px solid #26262B', background: '#141416', color: '#B9B9BE', cursor: 'pointer' }}
+                  >
+                    {clearing === s0.issueId ? 'clearing…' : 'clear verdict'}
+                  </button>
+                </div>
+              ))}
+            </div>
+            {clearFailed ? <div className="mt-2 text-[11.5px]" style={{ fontFamily: MONO, color: '#B4553A' }}>{clearFailed}</div> : null}
+          </div>
+        ) : null}
 
         {horizon ? (
           <div className="mt-8" style={{ borderTop: '1px solid #1F1F22', paddingTop: 22 }}>

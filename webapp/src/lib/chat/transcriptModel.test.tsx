@@ -38,7 +38,7 @@ const composerBaseProps = {
   selectedModel: "",
   modelOptions: [],
   onModelChange: () => {},
-} as const;
+};
 
 test("TranscriptEntryView renders human-first tool output with raw payload tucked away", () => {
   const entry: TranscriptEntry = {
@@ -121,6 +121,7 @@ test("AgentMetaBar keeps only compact git branch status at the top", () => {
   const agent: AgentDTO = {
     id: "a1",
     name: "chat",
+    kind: "omp-operator",
     status: "working",
     repo: "/home/lars/sui/omp-squad",
     worktree: "/home/lars/.omp/squad/worktrees/omp-squad-chat",
@@ -130,6 +131,8 @@ test("AgentMetaBar keeps only compact git branch status at the top", () => {
     receipt: { toolCalls: 4, tokens: 12345, durationMs: 65_000 },
     pending: [],
     lastActivity: 1,
+    messageCount: 0,
+    approvalMode: "always-ask",
     autonomyMode: "assist",
     effectiveMode: "assist",
     verificationState: "fresh",
@@ -145,6 +148,7 @@ test("ComposerStats renders ultra-compact context, tokens, tools, and time", () 
   const agent: AgentDTO = {
     id: "a1",
     name: "chat",
+    kind: "omp-operator",
     status: "working",
     repo: "/home/lars/sui/omp-squad",
     worktree: "/home/lars/.omp/squad/worktrees/omp-squad-chat",
@@ -153,6 +157,8 @@ test("ComposerStats renders ultra-compact context, tokens, tools, and time", () 
     receipt: { toolCalls: 8, tokens: 500_200, durationMs: 1_959_000 },
     pending: [],
     lastActivity: 1,
+    messageCount: 0,
+    approvalMode: "always-ask",
     autonomyMode: "assist",
     effectiveMode: "assist",
     verificationState: "unknown",
@@ -304,9 +310,9 @@ test("normalizeAssistantSessions no longer destructively migrates agent-backed s
     updatedAt: 5,
     metadata: { agentId: "agent-1" },
     messages: [
-      { role: "model", text: "welcome", timestamp: 1 },
-      { role: "user", text: "do the thing", timestamp: 2 },
-      { role: "model", text: "on it", timestamp: 3 },
+      { role: "model" as const, text: "welcome", timestamp: 1 },
+      { role: "user" as const, text: "do the thing", timestamp: 2 },
+      { role: "model" as const, text: "on it", timestamp: 3 },
     ],
   }];
 
@@ -388,11 +394,14 @@ test("a gate appearing mid-transcript still carries data-chat-message (detection
   const agent: AgentDTO = {
     id: "a1",
     name: "chat",
-    status: "waiting",
+    kind: "omp-operator",
+    status: "input",
     repo: "/home/lars/sui/omp-squad",
     worktree: "/home/lars/.omp/squad/worktrees/omp-squad-chat",
     pending: [{ id: "req-1", source: "tool", kind: "gate", title: "Approve this?", createdAt: 1 }],
     lastActivity: 1,
+    messageCount: 0,
+    approvalMode: "always-ask",
     autonomyMode: "assist",
     effectiveMode: "assist",
     verificationState: "unknown",
@@ -824,12 +833,15 @@ test("AgentLandControls labels the Land button plainly when prState is absent (l
   const agent: AgentDTO = {
     id: "a1",
     name: "chat",
+    kind: "omp-operator",
     status: "working",
     repo: "/home/lars/sui/omp-squad",
     worktree: "/home/lars/.omp/squad/worktrees/omp-squad-chat",
     branch: "squad/chat",
     pending: [],
     lastActivity: 1,
+    messageCount: 0,
+    approvalMode: "always-ask",
     autonomyMode: "assist",
     effectiveMode: "assist",
     verificationState: "fresh",
@@ -846,12 +858,15 @@ test("AgentLandControls labels the Land button 'Merged ✓' once the PR-mode lan
   const agent: AgentDTO = {
     id: "a1",
     name: "chat",
+    kind: "omp-operator",
     status: "working",
     repo: "/home/lars/sui/omp-squad",
     worktree: "/home/lars/.omp/squad/worktrees/omp-squad-chat",
     branch: "squad/chat",
     pending: [],
     lastActivity: 1,
+    messageCount: 0,
+    approvalMode: "always-ask",
     autonomyMode: "assist",
     effectiveMode: "assist",
     verificationState: "fresh",

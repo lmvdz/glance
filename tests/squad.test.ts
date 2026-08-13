@@ -38,7 +38,7 @@ class NoopDriver extends EventEmitter implements AgentDriver {
 	async stop(): Promise<void> {}
 	async prompt(): Promise<void> {}
 	async abort(): Promise<unknown> { return undefined; }
-	async getState(): Promise<RpcSessionState> { return { todoPhases: [], isStreaming: false } as RpcSessionState; }
+	async getState(): Promise<RpcSessionState> { return { todoPhases: [], isStreaming: false } as unknown as RpcSessionState; }
 	respondUi(): void {}
 	respondHostTool(): void {}
 }
@@ -545,7 +545,7 @@ test("buildBoard sorts an errored agent ABOVE an idle one (exception-first, was 
 });
 
 test("buildBoard flags a validator VETO on a green land-ready agent (badge + title + float)", () => {
-	const vetoed = dto({ id: "v", name: "vetoed-one", status: "idle", landReady: true, verificationState: "fresh", validation: { verdict: "veto", agreement: 0, confidence: 0.9, perCriterion: [], rationale: "criterion 2 unmet" } });
+	const vetoed = dto({ id: "v", name: "vetoed-one", status: "idle", landReady: true, verificationState: "fresh", validation: { verdict: "veto", agreement: 0, confidence: 0.9, perCriterion: [], rationale: "criterion 2 unmet", ranAt: 1 } });
 	const idle = dto({ id: "z", name: "zzz-idle", status: "idle" });
 	const plain = strip(buildBoard(board({ view: "list", selectedId: "z", agents: [idle, vetoed] })));
 	const joined = plain.join("\n");
@@ -556,7 +556,7 @@ test("buildBoard flags a validator VETO on a green land-ready agent (badge + tit
 });
 
 test("buildBoard agent view shows the landing/authority line: proof, VETO+rationale, confidence, mode", () => {
-	const sel = dto({ id: "s", name: "sole", status: "idle", landReady: true, verificationState: "fresh", effectiveMode: "assist", confidence: 0.22, validation: { verdict: "veto", agreement: 0, confidence: 0.9, perCriterion: [], rationale: "missing tests" } });
+	const sel = dto({ id: "s", name: "sole", status: "idle", landReady: true, verificationState: "fresh", effectiveMode: "assist", confidence: 0.22, validation: { verdict: "veto", agreement: 0, confidence: 0.9, perCriterion: [], rationale: "missing tests", ranAt: 1 } });
 	const plain = strip(buildBoard(board({ view: "agent", selectedId: "s", agents: [sel] }))).join("\n");
 	expect(plain).toContain("proof fresh");
 	expect(plain).toContain("VETOED: missing tests");

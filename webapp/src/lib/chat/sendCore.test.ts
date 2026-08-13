@@ -26,10 +26,10 @@ function makeDeps(overrides: Partial<SendCoreDeps> = {}): { deps: SendCoreDeps; 
 test('postChannelMessage posts only trimmed text to the channel-entry route', async () => {
   const calls: Array<[string, RequestInit | undefined]> = [];
   const result = await postChannelMessage({
-    apiJson: async (path, init) => {
+    apiJson: (async (path: string, init?: RequestInit) => {
       calls.push([path, init]);
       return { entry: { id: 'entry-1', seq: 1, channelId: 'fleet', authorActor: 'db:u1', kind: 'user', text: 'hello', ts: 1 } };
-    },
+    }) as never,
   }, 'team room', '  hello  ');
 
   expect(result.entry.id).toBe('entry-1');

@@ -168,14 +168,14 @@ test("upsertCheckRun: an existingId → PATCH to the specific check-run id, not 
 // ── github-api.ts ─────────────────────────────────────────────────────────────────────────────────
 
 test("githubApiRequest: an unparsable JSON body throws WedgeApiError rather than crashing", async () => {
-	globalThis.fetch = (async () => new Response("not json {{{", { status: 200 })) as typeof fetch;
+	globalThis.fetch = (async () => new Response("not json {{{", { status: 200 })) as unknown as typeof fetch;
 	await expect(githubApiRequest("GET", "/some/path", "t", InstallationTokenResponseSchema)).rejects.toThrow(WedgeApiError);
 });
 
 test("githubApiRequest: a network failure (fetch throws) surfaces as status 0, never an uncaught throw type", async () => {
 	globalThis.fetch = (async () => {
 		throw new Error("ECONNREFUSED");
-	}) as typeof fetch;
+	}) as unknown as typeof fetch;
 	try {
 		await githubApiRequest("GET", "/x", "t", InstallationTokenResponseSchema);
 		throw new Error("expected rejection");

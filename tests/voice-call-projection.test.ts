@@ -9,7 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { LocalStorageBackend, setStorageBackend, type StorageBackend } from "../src/dal/storage.ts";
 import { CallProjectionStore, type EmitVoiceDecisionCardInput } from "../src/voice-call-projection.ts";
-import type { JournalEnvelope } from "../src/voice-call-journal.ts";
+import type { JournalDecisionSnapshot, JournalEnvelope } from "../src/voice-call-journal.ts";
 
 /** Wraps a real `LocalStorageBackend` but fails ONLY `appendDurable` — the transcript-append write
  *  path — everything else (the projection state file's own sync writes/reads) behaves normally.
@@ -54,7 +54,7 @@ afterEach(() => {
 	rmSync(dir, { recursive: true, force: true });
 });
 
-function decisionEnvelope(seq: number, decision: Partial<JournalEnvelope["record"] extends { decision: infer D } ? D : never> & { id: string; state: string }): JournalEnvelope {
+function decisionEnvelope(seq: number, decision: Partial<JournalDecisionSnapshot> & { id: string; state: string }): JournalEnvelope {
 	return {
 		seq,
 		at: 1000 + seq,
