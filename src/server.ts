@@ -2210,6 +2210,31 @@ export class SquadServer {
 		// mints server-authored and writes through the single write rule (including the normalize-
 		// then-reject-empty guard from the blind-review fix); this route only maps outcomes to
 		// statuses so every conflict is explicit instead of a silent drop.
+		// The audited starvation clear verb (deepen 14, DESIGN v2): operator tier (authz mutation
+		// floor), explicit, 404 when there is nothing to clear — never a silent 200.
+		// Org-local starved issues (deepen 14 item 1): the LIVE rendered surface (MondaySurface)
+		// reads this; same manager the redispatch POST resolves — org binding by construction
+		// (item 5). The cross-org bootstrap aggregate in actionItemsPayload stays view-only.
+		if (url.pathname === "/api/issues/starved" && req.method === "GET") {
+			// 503, never an empty 200, on an unreadable ledger (codex, recovery round): a corrupt
+			// control file must render as FAILURE on MondaySurface, not as "no starved issues".
+			try {
+				return Response.json({ starved: manager.starvedIssueAttempts() });
+			} catch (err) {
+				return new Response(`issue-attempts ledger unreadable: ${errText(err)}`, { status: 503 });
+			}
+		}
+		const mstarve = url.pathname.match(/^\/api\/issues\/([^/]+)\/redispatch$/);
+		if (mstarve && req.method === "POST") {
+			const body: unknown = await req.json().catch(() => ({}));
+			const reason = body && typeof body === "object" && "reason" in body && typeof body.reason === "string" ? body.reason : undefined;
+			const cleared = await manager.clearIssueStarvationVerdict(decodeURIComponent(mstarve[1]), actor, reason);
+			// audit-failed is NOT 404 (grok, recovery round): the verdict still stands (rolled back) —
+			// telling the operator "nothing to clear" would read as healthy. 503 = retry the endpoint.
+			if (cleared === "cleared") return Response.json({ ok: true });
+			if (cleared === "audit-failed") return new Response("starvation clear rolled back — audit write failed; the verdict stands, retry", { status: 503 });
+			return new Response("no starvation verdict to clear for this issue", { status: 404 });
+		}
 		const mfsupersede = url.pathname.match(/^\/api\/features\/([^/]+)\/decisions\/supersede$/);
 		if (mfsupersede && req.method === "POST") {
 			const decoded = decodeBody(FeatureDecisionSupersedeBodySchema, await req.json().catch(() => null));
@@ -3722,4 +3747,3 @@ export class SquadServer {
 		this.server?.stop(true);
 	}
 }
-

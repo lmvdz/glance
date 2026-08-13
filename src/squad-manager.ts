@@ -193,6 +193,7 @@ import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
 import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollupRow } from "./metrics.ts";
 import { reflect } from "./reflection.ts";
 import { failureAnnotation, recordFailureAnnotation } from "./memory/failure-memory.ts";
+import { clearIssueStarvation, difficultyDispatchDecision, difficultyDispatchMode, effectiveEvidence, issueDifficultyDecision, recordIssueAttempt, restoreIssueAttemptRecord, starvedIssues } from "./dispatch-difficulty.ts";
 import { readModelOutcomes, recordModelOutcome, recordModelOutcomeBlocked, tierOf } from "./model-outcomes.ts";
 import { costGateMode, type CostVerdict, shadowCostCheck } from "./cost-gate.ts";
 import { recordCostLanded } from "./cost-aggregate.ts";
@@ -1745,6 +1746,19 @@ export class SquadManager extends EventEmitter {
 				record: this.automation.for("dispatch"),
 				ledger: openDispatchLedger(this.stateDir),
 				alreadyDone: (repo, issue) => this.issueAlreadyDone(repo, issue),
+				// Difficulty-targeted dispatch (deepen 14, CS329A borrow #1): evidence from the SAME
+				// model-outcomes ledger the spawn's outcome write will key (tier via the same tierOf
+				// derivation — dispatcher spawns carry no explicit thinking, so both sides key "mid").
+				// This tick-global class signal is TELEMETRY in every mode (always proceeds) — only the
+				// per-issue difficultyFor seam below defers in apply mode (grok, recovery round).
+				difficulty: () => {
+					const mode = difficultyDispatchMode();
+					if (mode === "off") return undefined; // off = silent, not a logged no-op per tick
+					return difficultyDispatchDecision(readModelOutcomes(this.stateDir), undefined, mode);
+				},
+				// Per-issue starve verdicts (DESIGN v2 seam — the tick-global dep above is telemetry
+				// only). REAL in apply mode since 3b-final; undefined = nothing to say.
+				difficultyFor: (_repo, issue) => issueDifficultyDecision(this.stateDir, issue, difficultyDispatchMode()),
 				liveAgents: () => this.list(),
 				scopeFinding: (repo, message) => this.fileScopeFinding("low", repo, message),
 			});
@@ -4490,6 +4504,14 @@ export class SquadManager extends EventEmitter {
 			// Never gates the land above; purely record-only, after the outcome is already known.
 			try {
 				recordModelOutcome(this.stateDir, effectiveModel, tierOf(rec.options.thinking), result.ok);
+				// Per-issue attempt evidence (deepen 14, DESIGN v2 single write point): judged outcomes
+				// only, runId-idempotent, record-only — the difficultyFor seam reads it as shadow.
+				// Active run id FIRST (codex finding: during a finalize race lastReceipt can still be the
+				// PREVIOUS run's receipt — preferring it dropped new outcomes as duplicates).
+				// runStartedAt from the SAME source as runId (grok, recovery round): in that finalize
+				// race lastReceipt's startedAt is the previous run's — billing the new outcome to the
+				// old generation, so post-clear failures could never re-arm starvation.
+				recordIssueAttempt(this.stateDir, dto.issue?.id, rec.run?.snapshot().runId ?? lastReceipt?.runId, result.ok, dto.id, undefined, dto.issue?.identifier, { repo: dto.repo, runStartedAt: rec.run?.snapshot().startedAt || lastReceipt?.startedAt });
 				// Lane-keyed landed counter (concern 08's documented rollout wire): same record-only,
 				// never-gates posture as recordModelOutcome above.
 				if (result.ok) recordCostLanded(this.stateDir, effectiveModel, tierOf(rec.options.thinking), rec.dto.lane);
@@ -9736,6 +9758,78 @@ export class SquadManager extends EventEmitter {
 	 *  before writing). */
 	storedFeatureDecisions(id: string): FeatureDecision[] | undefined {
 		return this.decisionLedger.stored(id);
+	}
+
+	/** Starved-and-unacked issues (deepen 14) — derived fresh from the attempts ledger, so the
+	 *  action-items surface and the dispatch gate can never disagree. */
+	starvedIssueAttempts(): Array<{ issueId: string; identifier?: string; repo?: string; attempts: number; fails: number; lastAt: number }> {
+		// Effective (current-generation) counters — the surface must show the same numbers the
+		// verdict and the clear audit use, never cumulative history (codex finding).
+		return starvedIssues(this.stateDir).map(({ issueId, record }) => {
+			const e = effectiveEvidence(record);
+			return { issueId, identifier: record.identifier, repo: record.repo, attempts: e.attempts, fails: e.fails, lastAt: record.lastAt };
+		});
+	}
+
+	/** The audited operator clear verb (deepen 14, 3b-final items 3+4): stamps the ack + generation
+	 *  watermarks, writes BOTH audit backends with the prior verdict evidence and the operator's
+	 *  reason, awaited — a clear whose audit failed is reported as failed, never a silent success.
+	 *  Touches neither the dispatch ledger nor race eligibility (once-per-issue-ever stays spent —
+	 *  post-starvation a human is in the loop, strictly stronger than another race). */
+	async clearIssueStarvationVerdict(issueId: string, actor: Actor, reason?: string): Promise<"cleared" | "not-starved" | "audit-failed"> {
+		let cleared: ReturnType<typeof clearIssueStarvation>;
+		try {
+			cleared = clearIssueStarvation(this.stateDir, issueId, actor.id);
+		} catch (err) {
+			// Strict ledger (codex, recovery round): an unreadable ledger or a failed verdict write
+			// now THROWS instead of reporting a success that never persisted. The verdict (if any)
+			// stands; 503 tells the operator to retry.
+			this.log("warn", `starvation clear for ${issueId} failed — ledger read/write error: ${errText(err)}`);
+			return "audit-failed";
+		}
+		if (!cleared) return "not-starved";
+		const prior = cleared.prior;
+		// The audit reports the EFFECTIVE (current-generation) verdict the operator actually acked —
+		// cumulative counters would contradict the 3/3 the surface showed (codex finding).
+		const e = effectiveEvidence(prior);
+		const detail = `prior verdict: ${e.fails}/${e.attempts} judged attempts failed${prior.identifier ? ` (${prior.identifier})` : ""}${reason ? `; reason: ${truncateLabel(reason, 200)}` : "; no reason given"}`;
+		const entry = makeAuditEntry({ actor, action: "dispatch.starvation.cleared", target: issueId, outcome: "ok", detail });
+		try {
+			// STRICT audit write (grok, recovery round): recordAudit deliberately swallows file-append
+			// failures — an audit must never break the action it records. This verb's contract is the
+			// inverse (the action must not survive its audit), so the file backend is written directly
+			// and unswallowed; in file mode store.appendAudit is a documented no-op, so this direct
+			// write is the ONLY real backend and the old recordAudit path made the rollback dead code.
+			await appendAudit(this.stateDir, entry);
+			await this.store.appendAudit({ actor: actor.id, action: "dispatch.starvation.cleared", target: issueId, detail: { prior: { attempts: e.attempts, fails: e.fails }, reason: reason ?? null } });
+		} catch (err) {
+			// Atomicity by compensation (codex finding): a clear whose audit failed must not survive —
+			// restore the pre-clear row so the verdict stands and the operator can retry the endpoint.
+			try {
+				restoreIssueAttemptRecord(this.stateDir, issueId, prior);
+			} catch (restoreErr) {
+				// Strict write can fail here too: the clear persisted but its audit did not, and the
+				// rollback could not undo it. The loudest honest signal available short of crashing.
+				this.log("error", `starvation clear for ${issueId}: audit failed AND rollback failed — clear persisted UNAUDITED: ${errText(restoreErr)}`);
+				return "audit-failed";
+			}
+			// The disk audit may already carry the "cleared" line (it lands before the DB backend) —
+			// append the compensation so the trail tells the truth. Best-effort recordAudit is right
+			// here: the rollback itself must never fail on its own audit (codex #5, recovery round).
+			await this.recordAudit(actor, "dispatch.starvation.clear-rolled-back", issueId, "error", `audit backend failed, verdict restored: ${errText(err)}`);
+			this.log("warn", `starvation clear for ${issueId} rolled back — audit write failed: ${errText(err)}`);
+			return "audit-failed";
+		}
+		// Broadcast only after both backends landed — a rolled-back clear must not have announced itself.
+		this.emit("event", { type: "audit", entry } satisfies SquadEvent);
+		// Make "let auto-dispatch try again" TRUE (codex finding, recovery round): the dispatcher's
+		// already-handled gate runs before difficultyFor and its ledger was add-only, so a cleared
+		// issue was never reconsidered. Forget it through the LIVE dispatcher (shared ledger
+		// instance — a second openSetLedger would resurrect the id from the stale in-memory copy);
+		// with auto-dispatch off no live instance exists, so an ad-hoc open is safe.
+		if (this.dispatcher) this.dispatcher.forgetIssue(issueId);
+		else openDispatchLedger(this.stateDir).delete(issueId);
+		return "cleared";
 	}
 
 	// ── operator-attention substrate (comprehension concern 01) ──────────────────────────────────

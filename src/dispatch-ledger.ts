@@ -13,6 +13,9 @@ import { openSetLedger, type SetLedger } from "./ledger.ts";
 export interface DispatchLedger {
 	has(issueId: string): boolean;
 	add(issueId: string): void;
+	/** Operator-driven forget (starvation clear): the issue becomes dispatchable again. The set is
+	 *  otherwise add-only — deletes happen only on an explicit, audited human verb. */
+	delete(issueId: string): void;
 }
 
 export function openDispatchLedger(stateDir: string): DispatchLedger {
@@ -20,5 +23,6 @@ export function openDispatchLedger(stateDir: string): DispatchLedger {
 	return {
 		has: (issueId) => ids.has(issueId),
 		add: (issueId) => ids.add(issueId),
+		delete: (issueId) => ids.delete(issueId),
 	};
 }
