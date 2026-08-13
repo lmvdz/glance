@@ -16,6 +16,9 @@ export interface PendingRequest {
   placeholder?: string;
   createdAt: number;
   gateClass?: boolean;
+  /** Mirrors backend: recreated from an agent-host ring replay during the post-reattach settle
+   *  window — read by ghost-expiry only, never gates answerability. */
+  replayed?: true;
 }
 
 /** Mirrors backend `AgentReport` (src/types.ts) — a non-blocking "I'm unsure, here's a proposal"
@@ -57,6 +60,10 @@ export interface TransitionEntry {
   at: number;
   cause?: { error?: string; priorId?: string; [k: string]: unknown };
   denied?: true;
+  /** Mirrors backend: reserved forward-compat tag on the shared cause shape. */
+  replayed?: true;
+  /** Mirrors backend: globally-unique entry identity (uuid); absent on pre-seq persisted lines. */
+  seq?: string;
 }
 
 export interface IssueRef {
@@ -69,6 +76,15 @@ export interface IssueRef {
   projectId?: string;
   blockedBy?: string[];
   noAutoDispatch?: boolean;
+  /** Mirrors backend scope contract (src/core-types.ts IssueRef): repo-relative path prefixes. */
+  requires?: string[];
+  owns?: string[];
+  produces?: string[];
+  scopeSource?: "inferred" | "operator";
+  /** Authored spec body for dispatch context — UNTRUSTED ticket text. */
+  description?: string;
+  /** Work lane from a Plane lane: label (src/lane.ts WorkLane). */
+  lane?: "hotfix" | "feature" | "chore";
 }
 
 export interface ProjectDTO {
@@ -361,9 +377,15 @@ export interface FeatureDTO {
   contextBundle?: FeatureContextBundleDTO;
   proof?: FeatureProofAggregateDTO;
   planRevisionCandidates?: PlanRevisionCandidateDTO[];
+  /** Mirrors backend: operator stage pin (wins over the derived stage). */
+  stageOverride?: FeatureStage;
+  /** Mirrors backend: archived features are hidden from the default board. */
+  archived?: boolean;
+  /** Mirrors backend: the workflow unit driving this feature, when one is. */
+  workflowAgentId?: string;
 }
 
-export type TodoStatus = "pending" | "in_progress" | "completed";
+export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned";
 
 export interface TodoTaskDTO {
   content: string;
@@ -387,11 +409,16 @@ export interface AgentSessionSummaryDTO {
   id?: string;
   name?: string;
   file?: string;
-  thinkingLevel?: string;
-  messageCount?: number;
-  queuedMessageCount?: number;
+  thinkingLevel?: "minimal" | "low" | "medium" | "high" | "xhigh";
+  steeringMode?: "all" | "one-at-a-time";
+  followUpMode?: "all" | "one-at-a-time";
+  interruptMode?: "immediate" | "wait";
   isCompacting?: boolean;
   autoCompactionEnabled?: boolean;
+  messageCount?: number;
+  queuedMessageCount?: number;
+  systemPromptLines?: number;
+  tools?: { name: string; description?: string }[];
 }
 
 export type AutonomyMode = "observe" | "assist" | "autodrive";
@@ -449,7 +476,7 @@ export interface WorkflowRunStateDTO {
   preferredLabel?: string;
   rollup: { label: string; status: "in_progress" | "completed" }[];
   runId?: string;
-  terminal?: { reason: string; at?: number; forkPoint?: { runId?: string; seq: number }; supersededBy?: string };
+  terminal?: { reason: string; at: number; forkPoint: { runId: string; seq: number }; supersededBy?: string };
 }
 
 /** One node in an agent's subagent tree (task-spawned children) — mirrors src/subagents.ts's
@@ -544,7 +571,7 @@ export interface AgentDTO {
   name: string;
   status: AgentStatus;
   /** Which runtime backs this agent. */
-  kind?: AgentKind;
+  kind: AgentKind;
   /** Specialization of this unit ("tester" writes the test first, "observer" reproduces a
    *  regression), orthogonal to `kind`. Absent = general coder (today's default). */
   executionRole?: ExecutionRole;
@@ -559,7 +586,7 @@ export interface AgentDTO {
   subagents?: SubagentNodeDTO[];
   /** Static workflow graph topology, captured once per run (concern 03's workflow.graph journal event). */
   workflowGraph?: WorkflowGraphSnapshotDTO;
-  workflow?: { path?: string; verify?: { command: string } };
+  workflow?: { path?: string; verify?: { command: string; maxFixups?: number; mode?: "verify" | "tdd" | "observe" } };
   repo: string;
   worktree: string;
   /** Originating room channel for this unit. Absent routes active-work cards to #fleet. */
@@ -590,18 +617,20 @@ export interface AgentDTO {
   transitions?: TransitionEntry[];
   errorTransitions1h?: number;
   lastActivity: number;
-  messageCount?: number;
+  messageCount: number;
   error?: string;
   issue?: IssueRef;
   featureId?: string;
-  autonomyMode: AutonomyMode;
-  effectiveMode: AutonomyMode;
-  verificationState: VerificationState;
+  /** Optional ON THE WIRE (an old daemon omits them) — the dto requiring these was drift the
+   *  conformance pair caught; read sites default explicitly instead of trusting a lie. */
+  autonomyMode?: AutonomyMode;
+  effectiveMode?: AutonomyMode;
+  verificationState?: VerificationState;
   proof?: { commit?: string; command?: string; ranAt?: number; fingerprint?: string };
   /** Epic 3 independent-validator verdict for this agent's most recent land attempt. */
   validation?: ValidationRecordDTO;
   blockedReason?: string;
-  availableActions: AgentAction[];
+  availableActions?: AgentAction[];
   /** Run-end self-confidence 0..1; absent until a run has finished. Below the daemon's confidence
    *  floor caps `effectiveMode` to `assist` (propose-only). */
   confidence?: number;
@@ -628,10 +657,41 @@ export interface AgentDTO {
   workflowState?: WorkflowRunStateDTO;
   /** Pre-dispatch harness scorecard (advisory shadow) — see `HarnessScorecardDTO`. */
   harnessScorecard?: HarnessScorecardDTO;
+  // ── Mirrored from the backend facets (concern 24 slice 2) — previously unmirrored ──────────────
+  approvalMode: "always-ask" | "write" | "yolo";
+  /** Resolved work lane (operator > label > classifier > "feature" default). */
+  lane?: "hotfix" | "feature" | "chore";
+  /** Re-adopted from a surviving worktree on relaunch and not yet re-run. */
+  adopted?: boolean;
+  /** flue-service only: passed the acceptance gate at onboard time. */
+  verified?: boolean;
+  /** Scope contract (repo-relative path prefixes) + its provenance. */
+  requires?: string[];
+  owns?: string[];
+  produces?: string[];
+  scopeSource?: "inferred" | "operator";
+  /** Which coding-agent harness backs this unit (omp/pi/claude-code/…). Absent ⇒ "omp". */
+  harness?: string;
+  /** Cross-host repo identity (normalized git origin) — federation collision-matching. */
+  repoId?: string;
+  /** Rough estimated completion time (ms epoch); a hint, not a deadline. */
+  etaAt?: number;
+  /** True only on the synthetic DTO create() returns when a spawn is parked at the WIP cap. */
+  queued?: boolean;
+  /** Harness capability summary (approval channel + restart survival). */
+  harnessCaps?: { toolApproval: "native" | "none" | "preauth-allowlist"; resumable: boolean; hostTools: boolean; contextInjection: "native" | "none" | "mcp" };
+  /** NAMES ONLY of resolved MCP servers — never the full spec (secrets/exec stay server-side). */
+  mcpServerNames?: string[];
+  /** Completion-push latch, exposed only at the genuine terminal event. */
+  completionPushArmed?: boolean;
+  completionPushKind?: "voice" | "category";
+  completionArmedAt?: number;
+  /** The needs-you ladder's computed, viewer-agnostic priority state. */
+  ladderPriority?: "error" | "pending-approval" | "awaiting-input" | "working" | "plan-ready" | "completed-unseen" | "idle";
 }
 
 export interface TranscriptTool {
-  callId: string;
+  callId?: string;
   name: string;
   args?: unknown;
   argsText?: string;
@@ -716,7 +776,11 @@ export interface ChannelEntry extends TranscriptEntry {
 export interface CommandInfo {
   name: string;
   description?: string;
-  args?: string;
+  aliases?: string[];
+  /** Argument hint shown after the name (from the command's input.hint). */
+  hint?: string;
+  /** Where it comes from: "builtin" | "skill" | "extension" | "custom" | "file". */
+  source?: string;
 }
 
 
@@ -837,9 +901,11 @@ export interface AuditEntry {
   /** land | create | answer | remove | kill | interrupt | set-model | catastrophe | prompt | plan-answer | … */
   action: string;
   /** the work unit acted on (an agent id, usually slug+hash); null for fleet-wide actions. */
-  target?: string | null;
-  outcome?: "ok" | "error";
+  target: string | null;
+  outcome: "ok" | "error";
   detail?: string;
+  /** Provenance tag ("voice" | "composer", open string) — observability-only, never authz. */
+  source?: string;
 }
 
 export type CommandAckDTO =
@@ -878,16 +944,52 @@ export interface VoiceCallTranscriptTurnDTO {
   gapBefore?: { missingCount: number };
 }
 
+/** Mirrors backend AutomationSkipReason (src/types.ts) — a CLOSED union; string would let UI
+ *  code treat arbitrary text as a structured skip reason (codex M, concern 24 round). */
+export type AutomationSkipReasonDTO = "budget" | "overlap" | "wip-cap" | "idle" | "already-handled" | "human-review" | "blocked" | "already-done" | "unreleased-state" | "dirty-main";
+
+/** Mirrors backend AutomationLoop (src/types.ts). */
+export type AutomationLoopDTO = "scout" | "observer" | "opportunity" | "dispatch" | "scope" | "plan-sync" | "resident-planner" | "sentinel" | "orphan-audit" | "land" | "episode";
+
+/** Mirrors backend AutomationEvent (src/types.ts) — one structured record per background-loop unit
+ *  of work; the payload of the "automation" SquadEvent variant and GET /api/automation rows. */
+export interface AutomationEventDTO {
+  id: number;
+  at: number;
+  loop: AutomationLoopDTO;
+  repo?: string;
+  agent?: string;
+  durationMs?: number;
+  llmCalls?: number;
+  found?: number;
+  filed?: number;
+  deduped?: number;
+  spawned?: number;
+  skipReason?: AutomationSkipReasonDTO;
+  level?: "info" | "warn" | "error";
+  detail?: string;
+}
+
+/** Mirrors backend VoiceCallParticipant (src/voice-call-manager.ts). */
+export interface VoiceCallParticipantDTO {
+  connId: string;
+  actorId: string;
+  displayName?: string;
+  /** True for the call's HOST — fixed at attach time, never re-derived. */
+  host: boolean;
+  joinedAt: number;
+}
+
 export type SquadEvent =
   | { type: "roster"; agents: AgentDTO[]; version: string }
   | { type: "agent"; agent: AgentDTO }
-  | { type: "removed"; id: string }
+  | { type: "removed"; id: string; channelId?: string }
   | { type: "features-changed" }
   | { type: "comment"; comment: ArtifactCommentDTO }
   | { type: "comment-resolved"; id: string; resolvedAt: number }
   | { type: "transcript"; id: string; entry: TranscriptEntry }
   | { type: "commands"; id: string; commands: CommandInfo[] }
-  | { type: "log"; level: "info" | "warn" | "error"; text: string }
+  | { type: "log"; level: "info" | "warn" | "error"; text: string; agentId?: string }
   | { type: "transition"; entry: TransitionEntry }
   | { type: "channel-entry"; channelId: string; entry: ChannelEntry }
   | CommandAckDTO
@@ -896,7 +998,16 @@ export type SquadEvent =
   // Concern 11: pushed once per journaled transcript turn actually appended — see `src/types.ts`'s
   // matching daemon-side variant for the full rationale (deliberately its OWN SquadEvent variant,
   // never a `channel-entry`, so a call's turns can never leak into the main channel timeline).
-  | { type: "voice-call-transcript-turn"; channelId: string; callId: string; entry: VoiceCallTranscriptTurnDTO };
+  | { type: "voice-call-transcript-turn"; channelId: string; callId: string; entry: VoiceCallTranscriptTurnDTO }
+  // Concern 24 (deepen round 3): the three daemon variants the mirror was MISSING ENTIRELY —
+  // unrepresentable frames, so no exhaustiveness check could ever fire on them (the round-2
+  // review's headline live drift). Mirrored from src/types.ts SquadEvent.
+  | { type: "audit"; entry: AuditEntry }
+  | { type: "automation"; event: AutomationEventDTO }
+  // Concern 13 (multi-party calls): one push per genuine attach/detach of a browser audio sink —
+  // presentation-plane only (never journaled); GET /api/channels/:id/voice-call's participants
+  // field is the durable-enough truth, this is the low-latency nudge.
+  | { type: "voice-call-participant"; channelId: string; callId: string; event: "joined" | "left"; participant: VoiceCallParticipantDTO };
 
 export type ClientCommand =
   | { type: "snapshot" }
@@ -916,4 +1027,15 @@ export type ClientCommand =
   // OMPSQ-448: continue a recoverable terminal run in place (retry budgets reset, same worktree) —
   // vs `fork`, which mints a fresh branch off HEAD. Gated in the UI on `AgentDTO.continueAvailable`.
   | { type: "continue"; id: string }
-  | { type: "typing"; channelId: string; active: boolean };
+  | { type: "typing"; channelId: string; active: boolean }
+  // Concern 24 (deepen round 3): the six daemon-accepted variants the mirror lacked — a UI adding
+  // one of these affordances now starts from the real wire shape instead of re-inventing it.
+  // Inner option/spec payloads are deliberately SHALLOW mirrors (Record<string, unknown>): the
+  // daemon decodes them with its own schemas; the webapp builds them via typed helpers when it
+  // actually grows the affordance (each shallow payload is a named future-granularity decision).
+  | { type: "answer"; id: string; requestId: string; value: string }
+  | { type: "create"; options: Record<string, unknown>; source?: string }
+  | { type: "commission"; spec: Record<string, unknown>; source?: string }
+  | { type: "set-mode"; id: string; mode: AutonomyMode; reason?: string }
+  | { type: "message"; to: string; text: string }
+  | { type: "notify"; id: string; summary: string; detail?: string };
