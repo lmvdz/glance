@@ -81,6 +81,13 @@ missing abandoned — undeclared render style) fixed so completely the allowance
 rest gained leaf pair gates (10 engine omissions named). 44 pairs gated total. Native row: cwd
 accident FOURTH strike (git rm + bun check both fooled from webapp/). Gates: check 0 both
 programs, root 5331/2-inherited+1-proven-flake, webapp 2002/0.
+## Round 3, iteration 8 (2026-08-11, goal mode — PR #376) — CONCERN 09 DONE
+Card-kind registry shipped: one webapp registration (tone+label+icon) per kind, recognition maps
+DERIVED (codex killed the second registration), fallbacks became explicit decisions — rendered
+output proven byte-equivalent (3,600 combos). Honest limits labeled: bespoke land/gate renderers
+own their live rendering. Codex M2 queued for the review round: projectionClasses/doorSurface
+quiet defaults are the same disease one layer deeper. Grok narration-only x4 this round — the
+CLI's headless reliability is itself becoming a finding. Gates all green.
 
 ## Round 2 (2026-08-04, iteration 37 — the goal's completion clause)
 Queue was dry (14 done, 3 needs-lars) → fresh review round executed: two Explore agents over

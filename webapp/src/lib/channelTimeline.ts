@@ -8,6 +8,7 @@ import type { TranscriptEventKind } from '../../../src/transcript-event-kinds.ts
 import { landCardView, type LandCardKind } from '../components/hub/LandCards';
 import { entryAuthorLabel, entryTimeLabel } from './hub';
 import { unitHref } from './router';
+import { CARD_KIND_REGISTRY, cardKindSpec, type RegisteredCardKind } from './cardKindRegistry';
 import { withoutRawRoomEvents } from './voice/roomCall';
 
 export type ChannelCardTone = 'neutral' | 'info' | 'warning' | 'success' | 'destructive';
@@ -149,39 +150,21 @@ export function buildChannelThreadViews(entries: ChannelEntry[]): ChannelCardVie
   return foldRepeatedAsks(withReplies);
 }
 
-// Daemon-emitted kinds only. Compile-time exhaustive: adding a member to ChannelCardKind that
-// isn't 'message' | 'unknown-event' | LocalCardKind forces a matching entry here (or the
-// `satisfies` fails), and an entry here for a kind that doesn't exist fails the same way.
-const POINTER_EVENT_KINDS = {
-  'needs-you': true,
-  'gate-verdict': true,
-  'land-attempt': true,
-  'land-assessment': true,
-  'land-merge': true,
-  'mention-steer': true,
-  'goal-overlap': true,
-  'plan-card': true,
-  'return-emit': true,
-  'design-revised': true,
-  'token-burn-snapshot': true,
-  'unit-spawned': true,
-  'unit-turn-finished': true,
-  'unit-failed': true,
-  'pr-opened': true,
-  'verification-ran': true,
-  'voice-call': true,
-  'voice-decision': true,
-  'voice-fleet-action': true,
-} satisfies Record<TranscriptEventKind, true>;
+// DERIVED from the card-kind registry (codex M, concern 09 round): these were a SECOND
+// hand-populated registration (compile-forced, but still a second place a new kind had to be
+// typed). The registry's own satisfies is exhaustive over TranscriptEventKind | LocalCardKind,
+// so deriving here means one registration covers recognition too. The casts are sound BECAUSE
+// of that exhaustiveness — every daemon kind is a registry key, split by the local: namespace
+// rule (tests/channel-card-kinds-sync.test.ts pins the rule at runtime across builds).
+const POINTER_EVENT_KINDS = Object.fromEntries(
+  (Object.keys(CARD_KIND_REGISTRY) as RegisteredCardKind[]).filter((k) => !k.startsWith('local:')).map((k) => [k, true]),
+) as Record<TranscriptEventKind, true>;
 
-// Client-minted kinds (see LocalCardKind). Exhaustive over LocalCardKind the same way.
 // Exported (only) for tests/channel-card-kinds-sync.test.ts's runtime collision check —
 // the one cross-build invariant tsc cannot see (see that test's doc).
-export const LOCAL_CARD_KINDS = {
-  'local:mention-confirm-required': true,
-  'local:mention-steer-failed': true,
-  'local:spawn-proposal': true,
-} satisfies Record<LocalCardKind, true>;
+export const LOCAL_CARD_KINDS = Object.fromEntries(
+  (Object.keys(CARD_KIND_REGISTRY) as RegisteredCardKind[]).filter((k) => k.startsWith('local:')).map((k) => [k, true]),
+) as Record<LocalCardKind, true>;
 
 /** Narrows a raw wire `eventKind` string to a known ChannelCardKind, or undefined if the daemon
  *  (or webapp) doesn't know how to render it yet. Replaces an unsound `as ChannelCardKind` cast
@@ -240,33 +223,13 @@ function isTone(value: unknown): value is ChannelCardTone {
   return value === 'neutral' || value === 'info' || value === 'warning' || value === 'success' || value === 'destructive';
 }
 
+// Tone policy lives in the card-kind registry (concern 09) — one home per kind. The daemon's
+// explicit face.tone always wins; message/unknown-event (structural defaults) read neutral.
 function toneFor(kind: string, face?: PointerCardFace): ChannelCardTone {
   if (face?.tone) return face.tone;
-  if (kind === 'needs-you') return 'warning';
-  if (kind === 'gate-verdict') return face?.status === 'pass' || face?.status === 'approved' ? 'success' : face?.status === 'fail' || face?.status === 'veto' ? 'destructive' : 'info';
-  if (kind === 'land-merge') return face?.status === 'merged' || face?.status === 'landed' ? 'success' : 'info';
-  if (kind === 'token-burn-snapshot') return face?.status === 'deny' ? 'destructive' : face?.status === 'ask' ? 'warning' : 'info';
-  if (kind === 'local:mention-confirm-required') return 'warning';
-  if (kind === 'local:mention-steer-failed') return 'destructive';
-  // A unit that stopped in a way it did not choose rendered NEUTRAL — identical to a unit starting.
-  // Every lifecycle card looked the same, so the one that mattered was invisible among the ones that
-  // did not. Failure is the loudest lifecycle fact there is.
-  if (kind === 'unit-failed') return 'destructive';
-  // Disclosure, not refusal (see squad-manager.ts's goalConflict comment) — nothing was blocked,
-  // so this is a heads-up to check, not an alarm.
-  if (kind === 'goal-overlap') return 'warning';
-  if (kind === 'local:spawn-proposal' || kind === 'mention-steer' || kind === 'plan-card') return 'info';
-  // voice-call: connecting/live are ordinary in-progress facts; degraded is a warning (socket lost,
-  // liveness unconfirmed); ended is neutral — it's the honest terminal state, not itself bad news.
-  if (kind === 'voice-call') return face?.status === 'degraded' ? 'warning' : face?.status === 'ended' ? 'neutral' : 'info';
-  // voice-decision: open/awaiting-confirmation genuinely need a human; answered is a success; a
-  // decision that never got one (expired/cancelled/failed) is neutral, not a failure of the room.
-  if (kind === 'voice-decision') return face?.status === 'answered' ? 'success' : face?.status === 'open' || face?.status === 'awaiting-confirmation' ? 'warning' : 'neutral';
-  // voice-fleet-action (concern 12): an executed approval is a success; a routine relayed action is
-  // ordinary info; deferred (held for a human) and failed both genuinely want a look; declined is
-  // the neutral, honest record of a human saying no.
-  if (kind === 'voice-fleet-action') return face?.status === 'executed' ? 'success' : face?.status === 'relayed' ? 'info' : face?.status === 'declined' ? 'neutral' : 'warning';
-  return 'neutral';
+  const spec = cardKindSpec(kind);
+  if (!spec) return 'neutral';
+  return typeof spec.tone === 'function' ? spec.tone(face) : spec.tone;
 }
 
 const LIFECYCLE_CARD_KINDS: Record<string, true> = { 'unit-spawned': true, 'unit-turn-finished': true, 'unit-failed': true, 'pr-opened': true, 'verification-ran': true };
@@ -457,32 +420,12 @@ function shortenPinnedValue(label: string, value: string): string {
   return value;
 }
 
-const DOOR_LABELS: Record<string, string> = {
-  'plan-card': 'Open plan DAG',
-  'token-burn-snapshot': 'Open fleet economics',
-  'needs-you': 'Answer it',
-  'gate-verdict': 'Open the proof',
-  'land-attempt': 'Open the land record',
-  'land-assessment': 'Open the land record',
-  'land-merge': 'Open the land record',
-  'local:spawn-proposal': 'Open the proposal',
-  'return-emit': 'Step into the agent',
-  'design-revised': 'Open plan DAG',
-  'voice-call': 'Open the call',
-  // Deliberately NOT needs-you's "Answer it". A fleet question and a call question are different
-  // work with different vocabulary — the fleet's opens a unit's task and diff, this one opens a
-  // question the call is blocked on — and two doors reading the same three words is how a person
-  // learns that the label does not tell them where they are going.
-  'voice-decision': 'Answer the question',
-  // voice-fleet-action: the card is the record of what the call did to the fleet — its door steps
-  // into the unit the action touched, same surface a lifecycle card opens.
-  'voice-fleet-action': 'Open the unit',
-};
-
-/** Label for a card's door button. Was hardcoded to "Open plan DAG" for every kind — a token-burn
- *  card offering to open a plan DAG is a lie about where the click goes. */
+/** Label for a card's door button — from the registry (concern 09); every registered kind
+ *  carries an EXPLICIT label ("Open" included), so a new kind cannot silently inherit a
+ *  generic door. Was hardcoded to "Open plan DAG" for every kind once — a token-burn card
+ *  offering to open a plan DAG is a lie about where the click goes. */
 export function doorLabel(kind: string): string {
-  return DOOR_LABELS[kind] ?? 'Open';
+  return cardKindSpec(kind)?.doorLabel ?? 'Open';
 }
 
 export function reduceChannelEntryWindow(entries: ChannelEntry[], incoming: ChannelEntry[], channelId: string, cap = 500): ChannelEntry[] {

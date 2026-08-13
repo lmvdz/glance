@@ -1,5 +1,5 @@
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, CheckCircle2, ChevronRight, CircleDot, FileText, Flame, GitMerge, Hash, Phone, Reply, Rocket, ShieldAlert, ShieldQuestion } from 'lucide-react';
+import { AlertCircle, ChevronRight, CircleDot, Hash, Reply } from 'lucide-react';
 import type { ChannelEntry } from '../../lib/dto';
 import { askedAgainLine, buildChannelThreadViews, cardUnitId, doorLabel, groupLifecycleRuns, runSummary, type ChannelCardTone, type ChannelCardView } from '../../lib/channelTimeline';
 import { foldVerdict } from '../../lib/roomState';
@@ -10,6 +10,7 @@ import { GateVerdictCard } from './GateVerdictCard';
 import { registerPresentation } from '../../lib/voice/roomCall';
 import { MentionedText } from '../chat/MentionOverlay';
 import { attachmentIdFromPath, extractAttachedImagePaths, stripAttachedImageMarkers } from '../../lib/spawnProposal';
+import { CARD_KIND_REGISTRY } from '../../lib/cardKindRegistry';
 
 const MONO = "'JetBrains Mono',ui-monospace,monospace";
 
@@ -30,32 +31,12 @@ const toneClass: Record<ChannelCardTone, string> = {
   destructive: 'border-red-400/35 bg-red-400/10 text-red-50',
 };
 
-const iconClass: Record<ChannelCardView['kind'], typeof ShieldAlert> = {
-  message: CircleDot,
-  'needs-you': ShieldAlert,
-  'gate-verdict': CheckCircle2,
-  'land-attempt': GitMerge,
-  'land-assessment': ShieldAlert,
-  'land-merge': GitMerge,
-  'token-burn-snapshot': Flame,
-  'mention-steer': CircleDot,
-  'goal-overlap': ShieldAlert,
-  'local:mention-confirm-required': ShieldAlert,
-  'local:mention-steer-failed': AlertCircle,
-  'local:spawn-proposal': CircleDot,
-  'plan-card': FileText,
-  'return-emit': CircleDot,
-  'design-revised': FileText,
-  'unit-spawned': Rocket,
-  'unit-turn-finished': CheckCircle2,
-  'unit-failed': AlertCircle,
-  'pr-opened': GitMerge,
-  'verification-ran': CheckCircle2,
-  'voice-call': Phone,
-  'voice-decision': ShieldQuestion,
-  'voice-fleet-action': CircleDot,
-  'unknown-event': CircleDot,
-};
+// Icons live in the card-kind registry (concern 09) — one home per kind; the timeline owns
+// only its two structural defaults (a plain chat row; a wire kind this build predates).
+function iconFor(kind: ChannelCardView['kind']): typeof CircleDot {
+  if (kind === 'message' || kind === 'unknown-event') return CircleDot;
+  return CARD_KIND_REGISTRY[kind].icon;
+}
 
 function LoadingTimeline() {
   return (
@@ -97,7 +78,7 @@ export const ChannelTimelineRow = memo(function ChannelTimelineRow({ view, onRep
   // opposite of what the reference asks for.
   const answerable = view.kind === 'needs-you' ? cardUnitId(view.entry) : undefined;
   const user = view.entry.kind === 'user';
-  const Icon = iconClass[view.kind];
+  const Icon = iconFor(view.kind);
   // Only a voice card carries a register today, and only its TEXT does — see VOICE_KINDS above.
   const register = VOICE_KINDS[view.kind] ? registerPresentation(view.register) : undefined;
   const voiceDoor =
