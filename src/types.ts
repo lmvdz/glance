@@ -21,7 +21,7 @@ import type { ModelLineage } from "./model-lineage.ts";
 import type { ChannelEntry } from "./channels.ts";
 import type { LensId } from "./lens-select.ts";
 import type { HarnessScorecard } from "./harness-scorecard.ts";
-import type { WorkLane, WorkLaneSource } from "./lane.ts";
+import type { WorkLane, WorkLaneSource } from "./core-types.ts";
 import type { ComplexityTier } from "./model-outcomes.ts";
 import type { LadderPriority } from "./attention-ladder.ts";
 import type { StoredTranscriptEntry } from "./voice-call-projection.ts";
@@ -1369,6 +1369,7 @@ export type AutomationSkipReason =
 	| "blocked" //         work exists but is blocked by open dependency issues
 	| "already-done" //    open issue's work is already recorded done in the repo (closed plan concern)
 	| "unreleased-state" // open issue's Plane state group isn't in the releasable dispatch set
+	| "difficulty" //      dispatch only: the work class is all-fail on judged evidence — deferred, not consumed (deepen 14)
 	| "dirty-main"; //     land loop only: main checkout has uncommitted tracked changes — land refused
 
 /**

@@ -62,13 +62,13 @@ async function freshStateDir(): Promise<string> {
 
 test("OMP_SQUAD_RESIDENT_PLANNER unset: start() constructs no ResidentPlanner (byte-for-byte unchanged default)", async () => {
 	const plane = planeStub();
-	configurePlane(plane.port);
+	configurePlane(plane.port!);
 	delete process.env.OMP_SQUAD_RESIDENT_PLANNER;
 	try {
 		const mgr = new SquadManager({ stateDir: await freshStateDir() });
 		await mgr.start();
 		expect((mgr as unknown as { residentPlanners: unknown[] }).residentPlanners).toHaveLength(0);
-		expect(mgr.factoryStatus().generatedAt).toBeGreaterThan(0); // status call itself doesn't throw
+		expect(mgr.factoryStatus().generatedAt!).toBeGreaterThan(0); // status call itself doesn't throw
 		await mgr.stop();
 	} finally {
 		plane.stop(true);
@@ -77,7 +77,7 @@ test("OMP_SQUAD_RESIDENT_PLANNER unset: start() constructs no ResidentPlanner (b
 
 test("OMP_SQUAD_RESIDENT_PLANNER=1 with a configured Plane repo: start() constructs and starts one ResidentPlanner per repo", async () => {
 	const plane = planeStub();
-	configurePlane(plane.port);
+	configurePlane(plane.port!);
 	process.env.OMP_SQUAD_RESIDENT_PLANNER = "1";
 	try {
 		const mgr = new SquadManager({ stateDir: await freshStateDir() });

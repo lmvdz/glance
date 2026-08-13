@@ -50,6 +50,7 @@ import { AFTER_ACTION_MARKER, type AfterActionInput, type AfterActionReport, com
 import { AttentionStore, type AttentionEvent as OperatorAttentionEvent, type AttentionRecordInput, type RecordResult, type SeenMap, type SurpriseCountMap } from "./attention.ts";
 import { computeLadderPriority, type LadderPriority } from "./attention-ladder.ts";
 import { errText } from "./err-text.ts";
+import { EscalationLedger, UnitAttentionLane } from "./unit-attention.ts";
 import { armCompletionPushKind, completionMinTurnMs, completionTurnLongEnough, type CompletionPushKind } from "./completion-push.ts";
 import { allowPushTap, isKnownPushTapAgentId, isValidPushTapAgentId } from "./authz.ts";
 import { isConsolePrompt, stripConsolePrompt } from "./console-prompt.ts";
@@ -124,7 +125,8 @@ import { buildContextPrimer, classifyQueryShape, searchFabric, type KbDocType } 
 import { sweepPresence, who } from "./presence.ts";
 import { harnessEventDecision } from "./harness-hooks.ts";
 import { adoptBranchName, adoptBrief, isSafeUntrackedPath, parseNulList } from "./adopt.ts";
-import { applyHeldNow, beginTurn, type BoundaryTurnStart, captureWorktreeTree, discardHeldNow, type HeldSync, HeldSyncStore, pruneDivergenceCaptures, syncTurnEnd } from "./boundary-sync.ts";
+import type { BoundaryTurnStart } from "./boundary-sync.ts";
+import { BoundarySyncLane } from "./boundary-sync-lane.ts";
 import { chooseFallback } from "./supervisor.ts";
 import { availableActions, effectiveAutonomyMode, modeFromApproval, validateRequestedMode, type AutonomyMode, type VerificationState } from "./autonomy.ts";
 import type {
@@ -194,6 +196,7 @@ import { AutomationLog, type AutomationQuery } from "./automation-log.ts";
 import { isFirstTryGreen, isOn, learningFlags, LearningMetrics, type MetricRollupRow } from "./metrics.ts";
 import { reflect } from "./reflection.ts";
 import { failureAnnotation, recordFailureAnnotation } from "./memory/failure-memory.ts";
+import { clearIssueStarvation, difficultyDispatchDecision, difficultyDispatchMode, effectiveEvidence, issueDifficultyDecision, recordIssueAttempt, restoreIssueAttemptRecord, starvedIssues } from "./dispatch-difficulty.ts";
 import { readModelOutcomes, recordModelOutcome, recordModelOutcomeBlocked, tierOf } from "./model-outcomes.ts";
 import { costGateMode, type CostVerdict, shadowCostCheck } from "./cost-gate.ts";
 import { recordCostLanded } from "./cost-aggregate.ts";
@@ -236,7 +239,6 @@ import {
 	TRANSCRIPT_EVENT_UNIT_SPAWNED,
 	TRANSCRIPT_EVENT_UNIT_TURN_FINISHED,
 	TRANSCRIPT_EVENT_VERIFICATION_RAN,
-	isTranscriptEventKind,
 } from "./transcript-event-kinds.ts";
 import { TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT, fleetTokenBurnPayload, tokenBurnFace, unitTokenBurnPayload } from "./token-burn.ts";
 import { emitDesignRevisedCard, emitGoalOverlapCard, emitMentionSteerCard, emitReturnEmitCard, emitTokenBurnSnapshotCard } from "./schema/channel-card.ts";
@@ -268,7 +270,7 @@ import {
 	type VoiceOwnerActor,
 } from "./voice-fleet.ts";
 import { NodeStore, compareActivity, type NodeState } from "./memory/nodes.ts";
-import { ForgedCardError, assertAuthentic, projectsToRoom, type CardProvenance } from "./projection-classes.ts";
+import { UnitCardProjector, type ProjectedUnitSession } from "./unit-card-projector.ts";
 import { coldStartLearningState } from "./unknowns.ts";
 import { RECOVERY_DELAY_MS, gateHealth, notificationText, readGateEvaluation, shouldLeaveTheApp, type GateEvaluation, type GateHealth, type WorthItReview } from "./leaving-the-app.ts";
 import { GateStore } from "./gate-store.ts";
@@ -931,7 +933,8 @@ interface AgentRecord {
 	/** End tree of the last completed turn — reused as the NEXT turn's start baseline so the
 	 *  turn-start capture can never race the agent's first edit (see boundary-sync.ts beginTurn).
 	 *  (Serialization of capture→sync→apply lives on the MANAGER, keyed by the real directory —
-	 *  `boundarySyncChains` — not per record: two `here` sessions can share one checkout.) */
+	 *  the lane's `chains` map in boundary-sync-lane.ts — not per record: two `here` sessions can
+	 *  share one checkout.) */
 	boundarySyncEndTree?: string;
 }
 
@@ -1314,6 +1317,11 @@ export class SquadManager extends EventEmitter {
 	/** Durable repos-this-operator-works-in set; unioned into `projects()`. See project-registry.ts. */
 	/** Project lane (src/project-lane.ts, concern 04 island #3) — owns the registry + ephemeral markers. */
 	private readonly projectLane: ProjectLane;
+	/** Unit-card projector (src/unit-card-projector.ts, concern 21) — turns a unit's transcript events
+	 *  and pending-request deltas into room cards. `emitUnitTranscriptEvent` and `ensureProjectedNode`
+	 *  stay manager methods (both have call sites outside the projector's own funnel) and reach it
+	 *  through the deps port wired in the constructor below. */
+	private readonly cardProjector: UnitCardProjector;
 	/** Restart-safe "raced this issue already, ever" ledger (adw-factory-borrows concern 07). Consulted
 	 *  and stamped by `tryRaceOnce` — see race-ledger.ts for why this must be persisted, not in-memory. */
 	private readonly raceLedger: RaceLedger;
@@ -1333,18 +1341,12 @@ export class SquadManager extends EventEmitter {
 	 *  behind GET /api/automation. Live events also broadcast as a `type:"automation"` SquadEvent.
 	 *  Assigned in the constructor (needs stateDir, which the constructor body sets). */
 	private readonly automation: AutomationLog;
-	/** Boundary sync (daily-onramp 03): durable held-patch ledger for `here`-class sessions whose
-	 *  turn patch could not be safely auto-applied to the operator's real checkout. Assigned in the
-	 *  constructor (needs stateDir). */
-	private readonly boundarySyncHeld: HeldSyncStore;
-	/** Boundary-sync serialization chains, keyed by realpath(realDir) — daemon-global, NOT per agent
-	 *  record: `realTreePath` is shared state (nothing stops two `here` sessions on one repo), and
-	 *  per-record chains let both pass their fingerprint checks and run `git apply` into the same
-	 *  checkout concurrently — same-file writes interleaving at machine speed, past git's context
-	 *  check (both check, then both write). Keying by the real directory makes every capture and
-	 *  apply targeting one checkout strictly sequential across sessions. Entries are removed when
-	 *  their chain drains (see queueBoundarySync), so the map never grows past live checkouts. */
-	private readonly boundarySyncChains = new Map<string, Promise<void>>();
+	/** Boundary sync (daily-onramp 03) — implementation + state live in src/boundary-sync-lane.ts
+	 *  (concern 18): the held-patch ledger, the per-checkout serialization chains, the turn-boundary
+	 *  wiring, and the attention surface. The lane sees the manager only through its five-closure
+	 *  deps port; delegations below keep the manager's public surface stable for server.ts and
+	 *  tests. Assigned in the constructor (needs stateDir). */
+	private readonly boundaryLane: BoundarySyncLane;
 	/** Agentic-learning-loop baseline (concern 01) — the five metrics (first-try-green, fixups-to-green,
 	 *  escalation, land-failure-streak, primer-empty) the rest of the learning loop is A/B'd against.
 	 *  Assigned in the constructor (needs stateDir). Never gates behavior — read-only observability. */
@@ -1368,14 +1370,6 @@ export class SquadManager extends EventEmitter {
 	private readonly superviseBudget = new Map<string, number>();
 	/** Pending authority writes keyed by agent/question, so readers observe the routing decision once it is durable. */
 	private readonly authorityWrites = new Map<string, Promise<void>>();
-	/** Manager card projections that exhausted ChannelStore's bounded append retry. */
-	private projectionFailures = 0;
-	/** First-sight-per-kind debug log for `projectUnitTranscriptEvent`'s `isTranscriptEventKind` guard
-	 *  — mirrors `schema/channel-card.ts`'s `warnedUnknownKinds` (re-port review follow-up, concern 02):
-	 *  a transcript event carrying a kind this build doesn't recognize used to be silently skipped with
-	 *  no signal anywhere; now it logs once per newly-seen kind rather than either staying silent or
-	 *  spamming a line per emit (a chatty unit could emit the same unknown kind hundreds of times). */
-	private readonly warnedUnknownTranscriptEventKinds = new Set<string>();
 	/** Per-agent count of advisory peer messages spent this run (OMP_SQUAD_PEERMSG_BUDGET). */
 	private readonly peerMessageBudget = new Map<string, number>();
 	/** Agent ids the daemon reattached to (surviving hosts) this run. */
@@ -1386,28 +1380,20 @@ export class SquadManager extends EventEmitter {
 	 *  `${repo}::${branch}` → `${headSha}::${reasonClass}`; increment only when the episode value
 	 *  changes, cleared for a branch when a non-retryable outcome records for it. In-memory on purpose:
 	 *  a daemon restart re-records at most once per still-live episode, which is acceptable noise. */
-	private readonly landBlockedEpisode = new Map<string, string>();
+	private readonly landBlockedLedger = new EscalationLedger();
 	/** Last warn-emit ms per `${repo}::${reasonClass}` for the land-blocked automation event — one
 	 *  re-emit per LAND_BLOCKED_WARN_COOLDOWN_MS per repo condition (a dirty main is ONE repo-level
 	 *  fact, not a per-agent fact), keeping the factory-status banner alive without the per-tick flood. */
 	private readonly landBlockedWarnAt = new Map<string, number>();
-	/** Bounded-escalation budget (finding #2, cross-lineage review): consecutive `land()` attempts on
-	 *  the SAME `landBlockedEpisode` value, keyed identically (`${repo}::${branch}`). Reset to 0 the
-	 *  moment the episode changes (a new commit or a different refusal reason is a genuinely new
-	 *  problem, not a continuation) and cleared entirely once a non-retryable outcome lands/rejects. */
-	private readonly landBlockedAttempts = new Map<string, number>();
-	/** Idempotency for `fileLandBlockedEscalation` — fires the "Needs you" attention item at most once
-	 *  per live episode (mirrors `unverifiedProofEscalated`'s pattern), not once per tick past the cap. */
-	private readonly landBlockedEscalated = new Set<string>();
-	/** Consecutive `aheadUnknown` reads for `agentHasUnlandedWork`'s `${repo}::${branch}` scope (finding
-	 *  #1, cross-lineage review of af3d534). Reset to 0 the INSTANT `aheadOfBase` next returns a real
-	 *  number for that scope — a persistent fault must reach a human, but a transient one must self-clear
-	 *  with no human involvement, and the reset is what makes the self-clear automatic. */
-	private readonly aheadUnknownStreak = new Map<string, number>();
-	/** Idempotency for `fileAheadUnknownEscalation` — fires at most once per unresolved streak (mirrors
-	 *  `landBlockedEscalated`'s pattern). Cleared alongside `aheadUnknownStreak` the moment the scope's
-	 *  git read recovers, so a LATER persistent fault on the same branch can escalate again. */
-	private readonly aheadUnknownEscalated = new Set<string>();
+	/** Bounded ahead-unknown escalation state (finding #1, cross-lineage review of af3d534) — same
+	 *  ledger shape as landBlockedLedger; both replaced five hand-rolled Map/Set fields (concern 19).
+	 *  Episode/attempt/once semantics live in unit-attention.ts's EscalationLedger. */
+	private readonly aheadUnknownLedger = new EscalationLedger();
+	/** THE per-unit attention raiser (concern 19): every append-then-emit onto
+	 *  `AgentDTO.attentionEvents` goes through this lane — one fail-open contract instead of eight
+	 *  hand-rolled variants. (Boundary-sync's kind-keyed REPLACE rows are a different behavior and
+	 *  deliberately keep their own path — see unit-attention.ts's module doc.) */
+	private readonly attention = new UnitAttentionLane({ log: (level, msg) => this.log(level, msg), emit: (rec) => this.emitAgent(rec as AgentRecord) });
 	/** Deterministic branch agent ids `reconcileParallelResume` just stopped, so the next `spawnFleetBranch`
 	 *  call under the same id knows to append the "resuming after a restart" addendum to the branch's
 	 *  re-prompt. Consumed (deleted) the moment spawnFleetBranch checks it — short-lived, not persisted. */
@@ -1452,6 +1438,10 @@ export class SquadManager extends EventEmitter {
 	private readonly attentionStore: AttentionStore;
 	private readonly channelStore: ChannelStore;
 	private readonly nodeStore: NodeStore;
+	/** ONE NodeRecordStore beside its siblings (concern 20's cheap fix): it was constructed 26×
+	 *  inline with INCONSISTENT warn loggers — 16 of the 26 call sites logged validation failures
+	 *  to nowhere (10 passed a logger). One field, one logger, every caller gets the same forensics. */
+	private readonly nodeRecords: NodeRecordStore;
 	/** Concern 02's per-thread live-call durable owner (plans/voice-orchestrated-room-integration).
 	 *  One coordinator per manager (i.e. per org in DB mode) — bindings are keyed by channelId, which
 	 *  is already scoped to this manager's own ChannelStore. */
@@ -1519,7 +1509,13 @@ export class SquadManager extends EventEmitter {
 			liveRepos: () => new Set([...this.agents.values()].map((r) => normalizeRepoPath(r.options.repo))),
 			featureRepos: () => [...this.featureStore.values()].map((pf) => pf.repo ?? ""),
 		});
-		this.boundarySyncHeld = new HeldSyncStore(path.join(this.stateDir, "boundary-sync"));
+		this.boundaryLane = new BoundarySyncLane(path.join(this.stateDir, "boundary-sync"), {
+			log: (level, msg) => this.log(level, msg),
+			agent: (id) => this.agents.get(id),
+			emit: (rec) => this.emitAgent(rec as AgentRecord),
+			recordAudit: (actor, action, target, outcome, detail) => this.recordAudit(actor, action, target, outcome, detail),
+			friction: (agentId, repo, gripe) => this.captureAutoFriction(agentId, repo, "auto:boundary-sync-held", gripe),
+		});
 		this.raceLedger = openRaceLedger(this.stateDir);
 		this.automation = new AutomationLog(this.stateDir, { onEvent: (event) => this.emit("event", { type: "automation", event } satisfies SquadEvent) });
 		this.learningMetrics = new LearningMetrics(this.stateDir, { log: (m) => this.log("warn", `learning-metrics: ${m}`) });
@@ -1529,6 +1525,24 @@ export class SquadManager extends EventEmitter {
 		this.store = opts.store ?? new FileStore(this.stateDir);
 		this.channelStore = new ChannelStore(this.stateDir, this.store, (m) => this.log("warn", `channels: ${m}`));
 		this.nodeStore = new NodeStore(this.store);
+		this.cardProjector = new UnitCardProjector({
+			log: (level, msg) => this.log(level, msg),
+			node: (rec) => this.ensureProjectedNode(rec),
+			appendCard: async (target, input) => {
+				const card = "room" in target
+					? await this.channelStore.appendManager(target.room, input)
+					: await this.channelStore.appendNodeManager(target.nodeId, input, target.inheritedFromChannelId);
+				this.emit("event", { type: "channel-entry", channelId: card.channelId, entry: card } satisfies SquadEvent);
+				return card;
+			},
+			emitUnitTranscriptEvent: (id, kind, text, payload) => this.emitUnitTranscriptEvent(id, kind, text, payload),
+			label: (value) => this.safeEventLabel(value),
+			operatorId: () => this.operator.id,
+			isSettling: (id) => this.settling.has(id),
+			roomWorthy: (req) => isRoomWorthyPending(req),
+			gateClassOf: (req) => gateClassOf(req),
+		});
+		this.nodeRecords = new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`));
 		this.attentionStore = new AttentionStore({ stateDir: this.stateDir, log: (m) => this.log("warn", `attention: ${m}`) });
 		this.bin = opts.bin;
 		this.autoLand = opts.autoLand ?? false;
@@ -1743,7 +1757,7 @@ export class SquadManager extends EventEmitter {
 		this.reconcileEphemeralProjects();
 		// Held boundary-sync patches are durable; their attention rows are not — re-raise them for
 		// restored sessions (and log, never hide, holds whose agent no longer exists).
-		await this.reattachHeldSyncs();
+		await this.boundaryLane.reattachAtBoot();
 		// DB mode: the registry runs pruneStaleSockets once over all orgs (a per-org manager must not).
 		if (!this.skipGlobalJanitors) await pruneStaleSockets().catch(() => []);
 		await this.bus.start();
@@ -1821,6 +1835,19 @@ export class SquadManager extends EventEmitter {
 				record: this.automation.for("dispatch"),
 				ledger: openDispatchLedger(this.stateDir),
 				alreadyDone: (repo, issue) => this.issueAlreadyDone(repo, issue),
+				// Difficulty-targeted dispatch (deepen 14, CS329A borrow #1): evidence from the SAME
+				// model-outcomes ledger the spawn's outcome write will key (tier via the same tierOf
+				// derivation — dispatcher spawns carry no explicit thinking, so both sides key "mid").
+				// This tick-global class signal is TELEMETRY in every mode (always proceeds) — only the
+				// per-issue difficultyFor seam below defers in apply mode (grok, recovery round).
+				difficulty: () => {
+					const mode = difficultyDispatchMode();
+					if (mode === "off") return undefined; // off = silent, not a logged no-op per tick
+					return difficultyDispatchDecision(readModelOutcomes(this.stateDir), undefined, mode);
+				},
+				// Per-issue starve verdicts (DESIGN v2 seam — the tick-global dep above is telemetry
+				// only). REAL in apply mode since 3b-final; undefined = nothing to say.
+				difficultyFor: (_repo, issue) => issueDifficultyDecision(this.stateDir, issue, difficultyDispatchMode()),
 				liveAgents: () => this.list(),
 				scopeFinding: (repo, message) => this.fileScopeFinding("low", repo, message),
 			});
@@ -2975,48 +3002,9 @@ export class SquadManager extends EventEmitter {
 		const marker = reattachMarker(priorId, ph?.harness ?? rec.options.harness ?? "unknown", priorContext !== undefined);
 		this.append(rec, "system", marker);
 		this.transition(rec, rec.dto.status, "adopted", { priorId });
-		await this.rekeyHeldSyncsOnReattach(rec, priorId);
+		await this.boundaryLane.rekeyOnReattach(rec, priorId);
 		this.emitAgent(rec);
 		return { marker, priorContext };
-	}
-
-	/** C2: a predecessor's held boundary-syncs die with their agent id across a `here` restart — ACP
-	 *  sessions are non-resumable, so `POST /api/console { reattachOf }` always mints a NEW agent id,
-	 *  and a hold keyed by the dead predecessor's id would otherwise be permanently unreachable (no
-	 *  live agent ever lists it again; `reattachHeldSyncs` at boot can only warn about the orphan).
-	 *  Re-key iff BOTH hold: explicit lineage (the client NAMES its dead predecessor via `reattachOf`)
-	 *  AND the new session's own real checkout (`realDir`, derived server-side from the ephemeral
-	 *  registration — never client-supplied) matches the hold's recorded `realDir` exactly. Neither
-	 *  alone is safe — explicit lineage with no tree match would hand one checkout's holds to a
-	 *  session on a different one; a bare tree match with no named lineage would be guessing from
-	 *  nothing. Re-keyed holds are surfaced immediately as the new agent's own held-sync attention,
-	 *  exactly like a same-tenure hold — never left to a boot log line the operator has to go find. */
-	private async rekeyHeldSyncsOnReattach(rec: AgentRecord, priorId: string): Promise<void> {
-		const realDir = rec.options.realTreePath;
-		if (!realDir) return; // the new session isn't a here-class session — nothing to re-key onto
-		const priorHeld = await this.boundarySyncHeld.listHeld(priorId).catch((err) => {
-			this.log("warn", `boundary-sync: couldn't read held patches for reattach lineage ${priorId}→${rec.dto.id}: ${errText(err)}`);
-			return [];
-		});
-		const resolvedRealDir = path.resolve(realDir);
-		const matching = priorHeld.filter((h) => path.resolve(h.realDir) === resolvedRealDir);
-		if (matching.length === 0) return;
-		for (const h of matching) {
-			try {
-				await this.boundarySyncHeld.rekey(h.id, rec.dto.id);
-			} catch (err) {
-				this.log("warn", `boundary-sync: re-key of held patch ${h.id} (${priorId}→${rec.dto.id}) failed: ${errText(err)}`);
-			}
-		}
-		const n = await this.boundarySyncHeld.listHeld(rec.dto.id).then((b) => b.length).catch(() => matching.length);
-		if (n > 0) {
-			this.raiseBoundarySyncAttention(
-				rec,
-				"held",
-				`sync held: ${n} turn${n === 1 ? "'s changes are" : "s' changes are"} recovered from your previous session`,
-				`Held for ${realDir} — nothing touched your checkout. Apply replays them in order after a fresh safety re-check; Discard drops them (the session worktree keeps every edit). Held patches: ${this.boundarySyncHeld.root}`,
-			);
-		}
 	}
 
 	/** Merge order (base → override): repo catalog (`.glance/profiles.json`, sanitized — see
@@ -3832,7 +3820,7 @@ export class SquadManager extends EventEmitter {
 			if (!(await nodes.get(rootId))) {
 				await nodes.create({ id: rootId, kind: "plan", title: "the fleet", state: "working", createdAt: Date.now() });
 			}
-			const records = new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`));
+			const records = this.nodeRecords;
 			if ((await records.list(rootId)).some((record) => record.kind === "learning-state")) return;
 			await records.put(coldStartLearningState(rootId, Date.now()));
 			this.log("info", "cold start: recorded six borrowed defaults and the unknowns ledger — nothing here was learned from you yet");
@@ -3848,7 +3836,7 @@ export class SquadManager extends EventEmitter {
 	 */
 	async planMotionHealth(nodeId: string, now = Date.now()): Promise<{ noticed: number; falsePositive: number }> {
 		try {
-			const records = (await new NodeRecordStore(this.store).list(nodeId)).filter((record): record is PlanMotionRecord => record.kind === "plan-motion");
+			const records = (await this.nodeRecords.list(nodeId)).filter((record): record is PlanMotionRecord => record.kind === "plan-motion");
 			return planMotionMetrics(records, now);
 		} catch (err) {
 			this.log("warn", `plan motion health unavailable for ${nodeId}: ${errText(err)}`);
@@ -3893,7 +3881,7 @@ export class SquadManager extends EventEmitter {
 	async costSummary(nodeId: string, context: { changesTheDecision?: boolean; notableCents?: number } = {}): Promise<CostSummary & { disclose: boolean }> {
 		let summary: CostSummary;
 		try {
-			summary = summariseCost(costEventsFrom(await new NodeRecordStore(this.store).list(nodeId)));
+			summary = summariseCost(costEventsFrom(await this.nodeRecords.list(nodeId)));
 		} catch (err) {
 			this.log("warn", `cost summary unavailable for ${nodeId}: ${errText(err)}`);
 			summary = summariseCost([]);
@@ -3910,7 +3898,7 @@ export class SquadManager extends EventEmitter {
 	 */
 	async rulesQuotedFor(nodeId: string, action: string): Promise<string[]> {
 		try {
-			return (await new NodeRecordStore(this.store).rulesSettling(nodeId, action)).map(quoteRule);
+			return (await this.nodeRecords.rulesSettling(nodeId, action)).map(quoteRule);
 		} catch (err) {
 			this.log("warn", `rules for ${nodeId}/${action} unavailable: ${errText(err)}`);
 			return [];
@@ -4049,7 +4037,7 @@ export class SquadManager extends EventEmitter {
 		proposals: RuleProposal[];
 	}> {
 		try {
-			const records = await new NodeRecordStore(this.store).list(nodeId);
+			const records = await this.nodeRecords.list(nodeId);
 			const rules = records
 				.filter((record): record is Extract<NodeRecord, { kind: "rule" }> => record.kind === "rule" && record.status === "active")
 				.map((rule) => ({
@@ -4078,7 +4066,7 @@ export class SquadManager extends EventEmitter {
 	/** The learning state: what is borrowed, what is unknown, and what would settle each. */
 	async learningState(): Promise<NodeRecord | undefined> {
 		try {
-			return (await new NodeRecordStore(this.store).list(SquadManager.ROOT_NODE_ID)).find((record) => record.kind === "learning-state");
+			return (await this.nodeRecords.list(SquadManager.ROOT_NODE_ID)).find((record) => record.kind === "learning-state");
 		} catch (err) {
 			this.log("warn", `learning state unavailable: ${errText(err)}`);
 			return undefined;
@@ -4114,7 +4102,7 @@ export class SquadManager extends EventEmitter {
 			if (!isRoomWorthyPending(req)) return; // routine tool approvals are noise, not decisions
 			const node = await this.ensureProjectedNode(rec);
 			const chose = typeof value === "string" ? value : JSON.stringify(value ?? "");
-			await new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`)).put({
+			await this.nodeRecords.put({
 				kind: "decision",
 				id: `decision:${rec.dto.id}:${req.id}`,
 				nodeId: node.id,
@@ -4139,7 +4127,7 @@ export class SquadManager extends EventEmitter {
 	 */
 	private async recordQuestionAuthority(rec: AgentRecord, questionId: string): Promise<void> {
 		const node = await this.ensureProjectedNode(rec);
-		const records = new NodeRecordStore(this.store, (message) => this.log("warn", `node-records: ${message}`));
+		const records = this.nodeRecords;
 		await records.put({
 			kind: "human-authority",
 			id: `human-authority:${node.id}:${questionId}`,
@@ -4157,12 +4145,12 @@ export class SquadManager extends EventEmitter {
 		if (!rec) return undefined;
 		await this.authorityWrites.get(`${agentId}:${questionId}`);
 		const node = await this.ensureProjectedNode(rec);
-		return new NodeRecordStore(this.store).accountableHumanForQuestion(node.id, questionId);
+		return this.nodeRecords.accountableHumanForQuestion(node.id, questionId);
 	}
 
 	/** Competing rules stay inspectable as disagreement until humans decide precedence semantics. */
 	async ruleDisagreements(nodeId: string, action?: string) {
-		return new NodeRecordStore(this.store).ruleDisagreements(nodeId, action);
+		return this.nodeRecords.ruleDisagreements(nodeId, action);
 	}
 	/**
 	 * Notice a plan that has gone still from its own movement history. This is deliberately invoked
@@ -4181,7 +4169,7 @@ export class SquadManager extends EventEmitter {
 				createdAt: input.now,
 			});
 		}
-		const records = new NodeRecordStore(this.store, (message) => this.log("warn", `node-records: ${message}`));
+		const records = this.nodeRecords;
 		const id = `plan-motion:${input.planId}:${assessment.record.lastMeaningfulMovementAt}`;
 		const prior = (await records.list(input.planId)).filter((record): record is PlanMotionRecord => record.kind === "plan-motion").find((record) => record.id === id);
 		const record = {
@@ -4208,7 +4196,7 @@ export class SquadManager extends EventEmitter {
 
 	/** Record the human's outcome, so the false-positive rate is evidence rather than a dashboard claim. */
 	async resolvePlanMotion(planId: string, lastMeaningfulMovementAt: number, outcome: "acknowledged" | "parked" | "dropped" | "resumed" | "false-positive", now = Date.now()): Promise<void> {
-		const records = new NodeRecordStore(this.store, (message) => this.log("warn", `node-records: ${message}`));
+		const records = this.nodeRecords;
 		const id = `plan-motion:${planId}:${lastMeaningfulMovementAt}`;
 		const record = (await records.list(planId)).filter((candidate): candidate is PlanMotionRecord => candidate.kind === "plan-motion").find((candidate) => candidate.id === id);
 		if (!record) throw new Error(`plan motion evidence ${id} not found`);
@@ -4231,23 +4219,23 @@ export class SquadManager extends EventEmitter {
 		readback: InstructionReadbackRecord,
 		reversibleWork: () => Promise<void>,
 	): Promise<InstructionExecution> {
-		return beginInstruction(new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`)), readback, reversibleWork);
+		return beginInstruction(this.nodeRecords, readback, reversibleWork);
 	}
 
 	async approveInstructionIrreversible(nodeId: string, instructionId: string): Promise<InstructionReadbackRecord> {
-		return approveIrreversible(new NodeRecordStore(this.store), nodeId, instructionId);
+		return approveIrreversible(this.nodeRecords, nodeId, instructionId);
 	}
 
 	async rejectInstructionIrreversible(nodeId: string, instructionId: string): Promise<InstructionReadbackRecord> {
-		return rejectIrreversible(new NodeRecordStore(this.store), nodeId, instructionId);
+		return rejectIrreversible(this.nodeRecords, nodeId, instructionId);
 	}
 
 	async raiseInstructionObjection(objection: ObjectionRecord): Promise<ObjectionRecord> {
-		return raiseObjection(new NodeRecordStore(this.store), objection);
+		return raiseObjection(this.nodeRecords, objection);
 	}
 
 	async overruleInstructionObjection(nodeId: string, objectionId: string, overruledBy: string): Promise<ObjectionRecord> {
-		return overruleObjection(new NodeRecordStore(this.store), nodeId, objectionId, overruledBy);
+		return overruleObjection(this.nodeRecords, nodeId, objectionId, overruledBy);
 	}
 
 	async recordInstructionObjectionOutcome(
@@ -4257,7 +4245,7 @@ export class SquadManager extends EventEmitter {
 		matchedPrediction: boolean,
 		at = Date.now(),
 	): Promise<ObjectionRecord> {
-		return recordObjectionOutcome(new NodeRecordStore(this.store), nodeId, objectionId, outcome, matchedPrediction, at);
+		return recordObjectionOutcome(this.nodeRecords, nodeId, objectionId, outcome, matchedPrediction, at);
 	}
 
 	/**
@@ -4267,7 +4255,7 @@ export class SquadManager extends EventEmitter {
 	 */
 	async ruleProposals(nodeId: string): Promise<RuleProposal[]> {
 		try {
-			return proposeRules(await new NodeRecordStore(this.store).list(nodeId));
+			return proposeRules(await this.nodeRecords.list(nodeId));
 		} catch (err) {
 			this.log("warn", `rule proposals for ${nodeId} unavailable: ${errText(err)}`);
 			return [];
@@ -4277,12 +4265,12 @@ export class SquadManager extends EventEmitter {
 	/** One agent's evidence record. There is deliberately no fleet-wide equivalent to rank people. */
 	async agentRecord(agentId: string, now = Date.now()): Promise<AgentRecordView | undefined> {
 		if (!this.agents.has(agentId)) return undefined;
-		return agentRecordView(agentId, await new NodeRecordStore(this.store).list(agentId), now);
+		return agentRecordView(agentId, await this.nodeRecords.list(agentId), now);
 	}
 
 	/** Every new agent starts with a role default and an explicit provisional checking contract. */
 	private async ensureAgentProfile(rec: AgentRecord): Promise<void> {
-		const records = new NodeRecordStore(this.store, (message) => this.log("warn", `node-records: ${message}`));
+		const records = this.nodeRecords;
 		const existing = await records.list(rec.dto.id);
 		if (existing.some((record) => record.kind === "agent-profile" && record.agentId === rec.dto.id)) return;
 		await records.put({
@@ -4303,7 +4291,7 @@ export class SquadManager extends EventEmitter {
 	 * destroys things.
 	 */
 	async planCompaction(nodeId: string, policy: CompactionPolicy, now = Date.now()): Promise<CompactionPlan> {
-		return planCompaction(await new NodeRecordStore(this.store).list(nodeId), policy, now);
+		return planCompaction(await this.nodeRecords.list(nodeId), policy, now);
 	}
 
 	/**
@@ -4319,7 +4307,7 @@ export class SquadManager extends EventEmitter {
 	): Promise<{ plan: CompactionPlan; removed: number; notice: string }> {
 		const now = opts.now ?? Date.now();
 		assertHumanAuthority("compactNodeRecords", opts.authority ?? "autonomous", await this.delegationGrants());
-		const records = new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`));
+		const records = this.nodeRecords;
 		const plan = await this.planCompaction(nodeId, policy, now);
 		const retention = { ...plan.retention, id: `retention:${nodeId}:${now}`, nodeId };
 		await records.put(retention);
@@ -4329,7 +4317,7 @@ export class SquadManager extends EventEmitter {
 
 	/** What moves to the next agent and what does not, stated before the handover is confirmed. */
 	async planHandover(nodeId: string, from: string, to: string, opts: { now?: number; ref?: string } = {}): Promise<HandoverPlan> {
-		return planHandover(await new NodeRecordStore(this.store).list(nodeId), { from, to, now: opts.now ?? Date.now(), ref: opts.ref });
+		return planHandover(await this.nodeRecords.list(nodeId), { from, to, now: opts.now ?? Date.now(), ref: opts.ref });
 	}
 
 	/** Plans a person has been shown. A proposal is never work — see `startProposal`. */
@@ -4596,17 +4584,23 @@ export class SquadManager extends EventEmitter {
 		if (!result.retryable && (auto || result.ok)) {
 			// Any non-retryable outcome (landed OR rejected) closes the branch's blocked EPISODE: the next
 			// retryable refusal is a genuinely new "attempted, couldn't land cleanly" fact, not a repeat.
-			this.landBlockedEpisode.delete(`${dto.repo}::${dto.branch ?? ""}`);
+			this.landBlockedLedger.clear(`${dto.repo}::${dto.branch ?? ""}`);
 			// Bounded-escalation state closes with the same episode (finding #2): a branch that lands or
 			// gets a genuine rejection starts the NEXT retryable episode's attempt count from zero.
-			this.landBlockedAttempts.delete(`${dto.repo}::${dto.branch ?? ""}`);
-			this.landBlockedEscalated.delete(`${dto.repo}::${dto.branch ?? ""}`);
 			recordLandOutcome(this.stateDir, dto.branch, result.ok, result.detail ?? result.message);
 			// Model-outcome ledger (Epic 6 concern 06): a cheap, always-on statistic — like land-ledger
 			// itself — so concern 07's default-shift has data on day one even before it's turned on.
 			// Never gates the land above; purely record-only, after the outcome is already known.
 			try {
 				recordModelOutcome(this.stateDir, effectiveModel, tierOf(rec.options.thinking), result.ok);
+				// Per-issue attempt evidence (deepen 14, DESIGN v2 single write point): judged outcomes
+				// only, runId-idempotent, record-only — the difficultyFor seam reads it as shadow.
+				// Active run id FIRST (codex finding: during a finalize race lastReceipt can still be the
+				// PREVIOUS run's receipt — preferring it dropped new outcomes as duplicates).
+				// runStartedAt from the SAME source as runId (grok, recovery round): in that finalize
+				// race lastReceipt's startedAt is the previous run's — billing the new outcome to the
+				// old generation, so post-clear failures could never re-arm starvation.
+				recordIssueAttempt(this.stateDir, dto.issue?.id, rec.run?.snapshot().runId ?? lastReceipt?.runId, result.ok, dto.id, undefined, dto.issue?.identifier, { repo: dto.repo, runStartedAt: rec.run?.snapshot().startedAt || lastReceipt?.startedAt });
 				// Lane-keyed landed counter (concern 08's documented rollout wire): same record-only,
 				// never-gates posture as recordModelOutcome above.
 				if (result.ok) recordCostLanded(this.stateDir, effectiveModel, tierOf(rec.options.thinking), rec.dto.lane);
@@ -4680,13 +4674,10 @@ export class SquadManager extends EventEmitter {
 			const episodeScope = `${dto.repo}::${dto.branch ?? ""}`;
 			const headSha = await headCommit(dto.worktree).catch(() => "");
 			const episode = `${headSha}::${reasonClass}`;
-			const isNewEpisode = this.landBlockedEpisode.get(episodeScope) !== episode;
+			const isNewEpisode = this.landBlockedLedger.noteEpisode(episodeScope, episode);
+			// A new episode is a genuinely NEW problem (different commit or different refusal reason) —
+			// noteEpisode restarted the escalation budget from zero, same rationale as the counter below.
 			if (isNewEpisode) {
-				this.landBlockedEpisode.set(episodeScope, episode);
-				// A new episode is a genuinely NEW problem (different commit or different refusal reason) —
-				// restart the escalation budget below from zero, same rationale as the model-outcome counter.
-				this.landBlockedAttempts.set(episodeScope, 0);
-				this.landBlockedEscalated.delete(episodeScope);
 				try {
 					recordModelOutcomeBlocked(this.stateDir, dto.model, tierOf(rec.options.thinking));
 					this.learningMetrics.record("model-outcome-blocked", 1, { flag: "model-outcomes", variant: learningFlags(dto.id).modelOutcomes });
@@ -4709,11 +4700,9 @@ export class SquadManager extends EventEmitter {
 			// review. Count every ATTEMPT (not edge-triggered like the model-outcome stat above — the
 			// budget must actually track how long the SAME episode has been stuck) and fire a "Needs you"
 			// attention item, once per episode, the moment it crosses the cap.
-			const attempts = (this.landBlockedAttempts.get(episodeScope) ?? 0) + 1;
-			this.landBlockedAttempts.set(episodeScope, attempts);
+			const attempts = this.landBlockedLedger.bump(episodeScope);
 			const cap = landBlockedEscalateCap();
-			if (cap > 0 && attempts >= cap && !this.landBlockedEscalated.has(episodeScope)) {
-				this.landBlockedEscalated.add(episodeScope);
+			if (cap > 0 && attempts >= cap && this.landBlockedLedger.escalateOnce(episodeScope)) {
 				this.fileLandBlockedEscalation(rec, dto.repo, blockDetail, reasonClass, attempts);
 			}
 		}
@@ -5661,7 +5650,7 @@ export class SquadManager extends EventEmitter {
 			// `refreshNodeSummaries`, which needs a live `AgentRecord` under the same id — precisely what
 			// an orphan does not have — so without this the row reads "stopped" while its own recorded
 			// summary goes on saying the unit is working, forever. Regenerate them from the corrected node.
-			const records = new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`));
+			const records = this.nodeRecords;
 			const now = Date.now();
 			for (const node of stopped) {
 				const summaries = regenerateNodeSummaries({ node, records: await records.list(node.id), now });
@@ -5768,7 +5757,7 @@ export class SquadManager extends EventEmitter {
 		if (!projected) return undefined;
 		const node = await this.nodeStore.transition(projected.id, rec.dto.status as NodeState);
 		if (!node) return undefined;
-		const records = new NodeRecordStore(this.store, (m) => this.log("warn", `node-records: ${m}`));
+		const records = this.nodeRecords;
 		const summaries = regenerateNodeSummaries({ node, records: await records.list(node.id), now: Date.now() });
 		await Promise.all(summaries.map((summary) => records.put(summary)));
 		return summaries[0].markdown;
@@ -6093,8 +6082,7 @@ export class SquadManager extends EventEmitter {
 		// re-paying for that wasted run every tick once a human has been notified, instead of thrashing
 		// the acceptance suite forever (finding #1, cross-lineage review of af3d534).
 		if (aheadUnknown(ahead)) return this.trackAheadUnknown(rec, scope);
-		this.aheadUnknownStreak.delete(scope);
-		this.aheadUnknownEscalated.delete(scope);
+		this.aheadUnknownLedger.clear(scope);
 		return ahead > 0;
 	}
 
@@ -6113,14 +6101,10 @@ export class SquadManager extends EventEmitter {
 	 * with no human action required for the transient case.
 	 */
 	private trackAheadUnknown(rec: AgentRecord, scope: string): boolean {
-		const streak = (this.aheadUnknownStreak.get(scope) ?? 0) + 1;
-		this.aheadUnknownStreak.set(scope, streak);
+		const streak = this.aheadUnknownLedger.bump(scope);
 		const cap = aheadUnknownEscalateCap();
 		if (cap > 0 && streak >= cap) {
-			if (!this.aheadUnknownEscalated.has(scope)) {
-				this.aheadUnknownEscalated.add(scope);
-				this.fileAheadUnknownEscalation(rec, streak);
-			}
+			if (this.aheadUnknownLedger.escalateOnce(scope)) this.fileAheadUnknownEscalation(rec, streak);
 			return false;
 		}
 		return true;
@@ -6138,13 +6122,7 @@ export class SquadManager extends EventEmitter {
 	private fileAheadUnknownEscalation(rec: AgentRecord, streak: number): void {
 		const summary = `aheadOfBase has returned "unknown" for ${rec.dto.branch ?? rec.dto.name} on ${streak} consecutive checks — needs a human to look`;
 		const detail = `agentHasUnlandedWork(${rec.dto.id}) — repo ${rec.dto.repo}, branch ${rec.dto.branch ?? "?"}: the underlying git read (aheadOfBase) keeps failing, so the auto-land loop is holding this unit rather than re-running the acceptance suite against an unresolved fault. It resumes automatically the moment aheadOfBase next returns a real count.`;
-		try {
-			const event: AttentionEvent = { id: randomUUID(), summary, detail, source: "notify", createdAt: Date.now() };
-			rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
-			this.emitAgent(rec);
-		} catch (err) {
-			this.log("warn", `ahead-unknown attention-lane attach failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
-		}
+		this.attention.raise(rec, { summary, detail, source: "notify" });
 		try {
 			this.log("warn", `${summary} — ${detail}`);
 			this.automation.for("land", rec.dto.repo)({ durationMs: 0, level: "warn", detail: `${summary} — ${detail}` });
@@ -6275,13 +6253,7 @@ export class SquadManager extends EventEmitter {
 	 */
 	private fileLandBlockedEscalation(rec: AgentRecord, repo: string, detail: string, reasonClass: string, attempts: number): void {
 		const summary = `auto-land has been blocked on ${rec.dto.branch ?? rec.dto.name} for ${attempts} consecutive attempts (${reasonClass}) — needs a human to look`;
-		try {
-			const event: AttentionEvent = { id: randomUUID(), summary, detail, source: "notify", createdAt: Date.now() };
-			rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
-			this.emitAgent(rec);
-		} catch (err) {
-			this.log("warn", `land-blocked attention-lane attach failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
-		}
+		this.attention.raise(rec, { summary, detail, source: "notify" });
 		try {
 			this.log("warn", `${summary} — ${detail}`);
 			this.automation.for("land", repo)({ durationMs: 0, level: "warn", skipReason: reasonClass === "dirty-main" ? "dirty-main" : undefined, detail: `${summary} — ${detail}` });
@@ -6300,13 +6272,7 @@ export class SquadManager extends EventEmitter {
 	 * fresh approve button. Best-effort; never throws.
 	 */
 	private stageCostGateConfirm(rec: AgentRecord, verdict: CostVerdict): void {
-		try {
-			const event: AttentionEvent = { id: randomUUID(), summary: `cost-gate(enforce) ASK: ${rec.dto.name} — ${verdict.line}`, detail: verdict.line, source: "notify", createdAt: Date.now() };
-			rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
-			this.emitAgent(rec);
-		} catch (err) {
-			this.log("warn", `cost-gate attention-lane attach failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
-		}
+		this.attention.raise(rec, { summary: `cost-gate(enforce) ASK: ${rec.dto.name} — ${verdict.line}`, detail: verdict.line, source: "notify" });
 	}
 
 	/**
@@ -6356,14 +6322,7 @@ export class SquadManager extends EventEmitter {
 	 * point of having a breaker. Best-effort; never throws.
 	 */
 	private fileMembraneBreakerFinding(rec: AgentRecord | undefined, repo: string, event: AttentionEvent): void {
-		if (rec) {
-			try {
-				rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
-				this.emitAgent(rec);
-			} catch (err) {
-				this.log("warn", `membrane-breaker attention-lane attach failed for ${rec.dto.name} (non-fatal): ${errText(err)}`);
-			}
-		}
+		if (rec) this.attention.raise(rec, event);
 		try {
 			const text = `${event.summary}${event.detail ? ` — ${event.detail}` : ""}`;
 			this.log("warn", text);
@@ -6561,7 +6520,7 @@ export class SquadManager extends EventEmitter {
 		o.promoted = true;
 		rec.dto.promoted = true; // wire mirror — the webapp's promote affordance keys off this
 		// S5: a promoted unit is a fleet unit by contract ("plain fleet units never carry
-		// realTreePath" — boundarySyncTarget's own doc comment) — clear it so future turns stay
+		// realTreePath" — the boundary-sync lane's `target` doc comment) — clear it so future turns stay
 		// worktree-scoped instead of continuing to auto-apply into the operator's real checkout after
 		// the session is no longer a casual `here` chat. EXISTING held syncs are untouched and remain
 		// Apply-able: they're historical records carrying their OWN `realDir`, read straight off the
@@ -6935,475 +6894,25 @@ export class SquadManager extends EventEmitter {
 		}
 	}
 
-	// ── Boundary sync (daily-onramp 03) ──────────────────────────────────────────────────────────
-	// One-directional per-turn patch-apply into the operator's real checkout, for `here`-class
-	// casual sessions only (`options.realTreePath` is the marker — plain fleet units never carry
-	// it). The decision core lives in boundary-sync.ts; this block is the turn-boundary wiring,
-	// per-agent serialization, and the attention surface. Fail-closed throughout: every branch
-	// that is not "fingerprints provably match" ends in hold + attention, never an apply.
+	// ── Boundary sync (daily-onramp 03) — implementation + state live in src/boundary-sync-lane.ts
+	// (concern 18); delegations keep the manager's public surface stable for server.ts and tests.
+	// The three per-session boundarySync* fields stay on AgentRecord (turn state dies with the
+	// record); the lane reads/writes them through its structural BoundarySyncSession slice.
 
-	/** Serialize boundary-sync work (turn-start capture → turn-end sync → explicit apply/discard)
-	 *  PER REAL DIRECTORY, so an apply can never interleave with a capture — including across two
-	 *  `here` sessions that target the same checkout (see `boundarySyncChains`). The key is the
-	 *  realpath of the real directory (symlinked and literal paths to one checkout must share a
-	 *  chain); a vanished directory falls back to the resolved literal path — captures against it
-	 *  fail closed anyway. The returned promise carries `fn`'s own failure to callers that await it;
-	 *  the stored chain swallows it (logged) so one failure never wedges the lane. */
-	private queueBoundarySync(rec: AgentRecord, realDir: string, fn: () => Promise<void>): Promise<void> {
-		// Chain under BOTH the realpath and the literal resolved path when they differ (and under
-		// the literal path alone when realpath fails, e.g. the directory is briefly gone — captures
-		// against it fail closed anyway). Linking both closes the alias gap: an op queued by literal
-		// path during a realpath outage still serializes with later realpath-keyed ops through the
-		// shared literal key, so one checkout never runs two chains.
-		const resolved = path.resolve(realDir);
-		let keys: string[];
-		try {
-			const real = realpathSync(resolved);
-			keys = real === resolved ? [resolved] : [real, resolved];
-		} catch {
-			keys = [resolved];
-		}
-		const priors = keys.map((k) => this.boundarySyncChains.get(k)).filter((p): p is Promise<void> => p !== undefined);
-		const run = Promise.all(priors).then(fn);
-		const stored = run.catch((err) => {
-			this.log("warn", `boundary-sync (${rec.dto.name}): ${errText(err)}`);
-		});
-		for (const key of keys) this.boundarySyncChains.set(key, stored);
-		void stored.finally(() => {
-			// Drop the drained chain iff nothing queued behind it — keeps the map bounded by live
-			// checkouts without ever detaching a chain something else is already linked onto.
-			for (const key of keys) if (this.boundarySyncChains.get(key) === stored) this.boundarySyncChains.delete(key);
-		});
-		return run;
-	}
-
-	/** The sync target, iff this record is a `here`-class session AND the target is not the agent's
-	 *  own worktree. The self-apply guard is defensive (OMPSQ-40 means a here-session always gets a
-	 *  standard worktree today): if the two ever alias, "apply the turn's patch to the real tree"
-	 *  would re-apply changes onto the tree that already contains them — `git apply --check` would
-	 *  refuse and every turn would raise a spurious hold. Skipping is the honest no-op: the "real
-	 *  tree" already sees every edit directly. */
-	private boundarySyncTarget(rec: AgentRecord): string | undefined {
-		const realDir = rec.options.realTreePath;
-		if (!realDir) return undefined;
-		if (rec.options.worktree && path.resolve(realDir) === path.resolve(rec.options.worktree)) return undefined;
-		return realDir;
-	}
-
-	/** N4: the real-dir to use for the EXPLICIT Apply/Discard affordances specifically — unlike
-	 *  `boundarySyncTarget` (turn start/end wiring, which must stay live-session-only), these two
-	 *  affordances must keep working for a session's PRE-EXISTING holds even after `promote()` clears
-	 *  `options.realTreePath` (S5 — a promoted unit is a fleet unit by contract, so future turns
-	 *  correctly stop auto-syncing). The commit that shipped S5 claimed existing holds "remain
-	 *  Apply-able" because they carry their own `realDir` straight off the ledger — true of the
-	 *  ledger record, but `applyHeldSync`/`discardHeldSync` never actually READ it: they gated on
-	 *  `boundarySyncTarget(rec)`, which returns `undefined` post-promote regardless of what's held, so
-	 *  the claim was false in practice (every call errored "no boundary sync"). Falling back to the
-	 *  first held patch's own `realDir` when the live option is gone makes the claim true without
-	 *  touching the live-session wiring at all. */
-	private async boundarySyncResolveDir(rec: AgentRecord): Promise<string | undefined> {
-		const live = this.boundarySyncTarget(rec);
-		if (live) return live;
-		const held = await this.boundarySyncHeld.listHeld(rec.dto.id).catch(() => []);
-		return held[0]?.realDir;
-	}
-
-	/** agent_start/turn_start: capture the turn's baselines. Failures are recorded on the record
-	 *  (NOT defaulted) so turn end holds with the precise reason — a failed capture can never
-	 *  compare equal to anything. */
-	private boundaryTurnStart(rec: AgentRecord): void {
-		const realDir = this.boundarySyncTarget(rec);
-		if (!realDir) return;
-		// First turn only (later turns reuse the prior end tree): start the WORKTREE snapshot NOW,
-		// off-chain — the queue below can be parked behind another session's replay on this same
-		// checkout, and a baseline captured only when the chain drains would already contain the
-		// agent's first edits, silently excluding them from the turn patch (a lost update, not a
-		// hold). The worktree is this session's own; only real-tree reads/writes need the chain.
-		const earlyTree = rec.boundarySyncEndTree === undefined ? captureWorktreeTree(rec.options.worktree).catch((err) => ({ ok: false as const, reason: errText(err) })) : undefined;
-		void this.queueBoundarySync(rec, realDir, async () => {
-			// M1: stamped INSIDE the per-checkout chain, not before it. A synchronous increment here
-			// (outside the chain) would race the NEXT turn's own start against THIS turn's still-queued
-			// end-sync closure — the chain serializes per REAL DIRECTORY, not per call, so a fast next
-			// turn's synchronous bump could land before a backlogged end-sync closure ever reads it,
-			// mislabeling turn N's held record as turn N+1's. Stamping inside the same FIFO chain both
-			// turns share pins the number to true execution order instead of wall-clock call order.
-			rec.boundarySyncTurn = (rec.boundarySyncTurn ?? 0) + 1;
-			rec.boundarySyncStart = await beginTurn(realDir, rec.options.worktree, rec.boundarySyncEndTree, earlyTree);
-		});
-	}
-
-	/** agent_end (squad-manager's turn-finished boundary): compute this turn's patch and apply it
-	 *  iff the real tree provably has not moved since turn start; otherwise hold + attention. */
-	private boundaryTurnEnd(rec: AgentRecord): void {
-		const realDir = this.boundarySyncTarget(rec);
-		if (!realDir) return;
-		void this.queueBoundarySync(rec, realDir, async () => {
-			const start = rec.boundarySyncStart;
-			// No live turn start in this process ⇔ a replayed/stale agent_end (reattach replay) — skip
-			// rather than fabricate a baseline. A daemon that died mid-turn simply never auto-applies
-			// that turn (today's behavior: the real tree is untouched, the diff view still shows all).
-			if (!start) return;
-			rec.boundarySyncStart = undefined; // consume — one sync decision per live turn
-			// Does this turn's patch SPAN the prior end tree? When an uncapturable turn left endTree
-			// stale, the next turn's baseline is that same stale tree — its patch therefore CONTAINS
-			// the uncapturable turn's edits, so a later applied/noop/held outcome genuinely resolves
-			// the standing "worktree-only edits" warning. A first-turn live baseline (no prior end
-			// tree) does NOT: edits from an earlier uncapturable turn are inside the baseline and
-			// will never sync, so the warning must stand.
-			const spannedPrior = start.startTree !== undefined && rec.boundarySyncEndTree !== undefined && start.startTree === rec.boundarySyncEndTree;
-			const outcome = await syncTurnEnd({ realDir, worktree: rec.options.worktree, start, store: this.boundarySyncHeld, agentId: rec.dto.id, turn: rec.boundarySyncTurn ?? 0 }).catch((err) => {
-				// syncTurnEnd already holds on any internal throw it can (S6) — this backstop only fires
-				// if something escapes even THAT (e.g. a throw before its own try block). Same fail-closed
-				// direction — the real tree was never touched — but the failure must be VISIBLE, not a
-				// daemon-log-only whisper: the operator would otherwise believe syncing is live while
-				// turns silently evaporate.
-				return { kind: "uncapturable", reason: `sync bookkeeping failed: ${errText(err)}` } as const;
-			});
-			// N3: the S6 ledger-append-failed sub-case of "held" (patch body written, but the ledger line
-			// that would track it never landed) must NOT advance endTree — advancing it here was a
-			// RECOVERY REGRESSION vs. pre-C1 behavior: it made this turn's edits invisible to
-			// backlog/listHeld/Apply/boot-sweep (nothing durable points at them) AND, by moving the
-			// baseline forward, made it impossible for a LATER spanning patch to ever carry them again —
-			// silently and permanently skipping turn N even though pre-fix (`uncapturable`, endTree left
-			// stale) the very next turn's spanning patch would have recovered them. Leaving endTree stale
-			// here keeps this turn's edits inside the NEXT turn's baseline→worktree delta, exactly like a
-			// genuine `uncapturable` outcome already does.
-			const ledgerAppendFailed = outcome.kind === "held" && outcome.held === undefined && outcome.patchFile !== undefined;
-			if (outcome.kind !== "uncapturable" && !ledgerAppendFailed && outcome.endTree) rec.boundarySyncEndTree = outcome.endTree;
-			switch (outcome.kind) {
-				case "noop":
-					// spannedPrior + empty patch ⇒ the worktree equals the already-synced prior end
-					// tree — any earlier uncapturable turn's edits were nil/reverted; the warning is moot.
-					if (spannedPrior) this.clearBoundarySyncAttention(rec, "uncapturable");
-					return;
-				case "applied":
-					// N2: "held" clears unconditionally — an "applied" outcome only happens when
-					// `syncTurnEnd` verified the backlog was empty (step 2 of its precondition), so no held
-					// row can legitimately still be standing. "uncapturable" clears only when this patch
-					// actually spanned it. Passing `undefined` here used to blanket-clear EVERY
-					// boundary-sync row regardless of kind — including "divergence", whose whole point is to
-					// persist until the operator explicitly acts on it — so a critical divergence notice
-					// raised at turn N was silently swept by the very next clean turn N+1 (every ordinary
-					// consecutive turn has `spannedPrior` true). `clearBoundarySyncAttention`'s `only`
-					// parameter is now required — no call site can ever again reintroduce a blanket clear.
-					this.clearBoundarySyncAttention(rec, "held");
-					if (spannedPrior) this.clearBoundarySyncAttention(rec, "uncapturable");
-					this.log("info", `boundary-sync (${rec.dto.name}): turn ${rec.boundarySyncTurn} applied to ${realDir} (${outcome.patchBytes} patch bytes)`);
-					if (outcome.divergence) {
-						// C1: the write happened, but a concurrent edit to one of these exact paths may have
-						// interleaved with it — critical, never auto-restored, always named.
-						this.raiseBoundarySyncAttention(
-							rec,
-							"divergence",
-							`sync divergence detected: ${outcome.divergence.paths.length} path${outcome.divergence.paths.length === 1 ? "" : "s"} may have been clobbered`,
-							`A concurrent edit to ${outcome.divergence.paths.join(", ")} in ${realDir} may have interleaved with this turn's write. Nothing was rolled back automatically. ` +
-								`The pre-write copy is retained at ${outcome.divergence.captureDir} — compare it against your current file(s) by hand before deciding whether to restore from it.`,
-						);
-						// Concern 02: a genuinely NEW divergence, discovered exactly once at the moment this
-						// turn's own write happened — never re-raised (a restart never replays a live turn's
-						// agent_end; the `!start` guard above already returns before this switch on any replay).
-						this.captureAutoFriction(rec.dto.id, realDir, "auto:boundary-sync-held", `boundary sync divergence: a concurrent edit to ${outcome.divergence.paths.join(", ")} in ${realDir} may have interleaved with this turn's write (agent ${rec.dto.name})`);
-					}
-					return;
-				case "held": {
-					// The held patch spans the prior end tree, so it CONTAINS any uncapturable turn's
-					// edits — Apply will deliver them; the standalone warning is superseded.
-					if (spannedPrior) this.clearBoundarySyncAttention(rec, "uncapturable");
-					if (outcome.held === undefined && outcome.patchFile) {
-						// S6/N3: the patch body itself is safely on disk; only the ledger append that would
-						// normally track it failed. `sync: "uncapturable"`, NOT "held" — the webapp's Apply
-						// affordance is gated on the sync kind (`insights.ts`), and offering Apply/Discard here
-						// would be a lie: there is no ledger-tracked hold to replay or drop yet, only a
-						// dangling patch file `endTree` deliberately did NOT advance for (see above), so the
-						// NEXT turn's spanning patch still carries these edits — recoverable that way, by hand
-						// (the exact file named below), or by the boot sweep (`sweepOrphanedPatches`, wired in
-						// `reattachHeldSyncs`) once the ledger heals — never "nothing is held", never a false
-						// Apply-able affordance either.
-						this.raiseBoundarySyncAttention(
-							rec,
-							"uncapturable",
-							"sync held: this turn's patch is saved but not yet tracked",
-							`${outcome.reason} — the patch itself is safe at ${outcome.patchFile}; it won't show up under Apply/Discard until tracking it succeeds. Inspect ${this.boundarySyncHeld.root} or retry the turn.`,
-						);
-						return;
-					}
-					// Count is display-only; ≥1 is certain (this turn's hold just landed), so a ledger
-					// read hiccup must not suppress the row itself.
-					const n = await this.boundarySyncHeld.listHeld(rec.dto.id).then((b) => b.length).catch(() => 1);
-					this.raiseBoundarySyncAttention(
-						rec,
-						"held",
-						`sync held: ${outcome.reason}`,
-						`${n} turn${n === 1 ? "'s changes are" : "s' changes are"} held for ${realDir} — nothing touched your checkout. ` +
-							`Apply replays them in order after a fresh safety re-check; Discard drops them (the session worktree keeps every edit). ` +
-							`Held patches: ${this.boundarySyncHeld.root}`,
-					);
-					// Concern 02: fires only here, at the moment `syncTurnEnd` durably created a BRAND NEW
-					// held patch (this branch requires `outcome.held !== undefined` — the ledger-append-failed
-					// sub-case returned above as "uncapturable" instead) — never at a re-raise of an
-					// already-known hold. `reattachHeldSyncs` (boot re-raise) and `rekeyHeldSyncsOnReattach`
-					// (restart-reattach re-key) both call `raiseBoundarySyncAttention` directly for EXISTING
-					// holds without ever routing through this turn-end origin path, so neither can double-count
-					// this — no time-window/id dedup needed, the call graph itself makes it exactly-once.
-					this.captureAutoFriction(rec.dto.id, realDir, "auto:boundary-sync-held", `boundary sync held: ${outcome.reason} (agent ${rec.dto.name}, ${realDir})`);
-					return;
-				}
-				case "uncapturable":
-					// The turn's delta itself couldn't be captured — nothing to hold OR apply, so this
-					// row must never claim a patch is waiting (no "held", no Apply). Same fail-closed
-					// direction (real tree untouched), surfaced so the operator knows edits exist only
-					// in the worktree (visible via the normal diff view).
-					this.raiseBoundarySyncAttention(
-						rec,
-						"uncapturable",
-						"sync couldn't run: this turn's changes couldn't be captured",
-						`${outcome.reason} — nothing is held and your checkout is untouched; this turn's edits live only in the session's worktree (${rec.options.worktree}) and show in the diff view.`,
-					);
-					return;
-			}
-		});
-	}
-
-	/** One boundary-sync attention row per agent PER KIND, always the freshest state (a stack of
-	 *  stale "sync held" rows for the same session is noise, not signal — but a "held" row and an
-	 *  "uncapturable" row state different truths and must never erase each other: an uncapturable
-	 *  turn after a held backlog would otherwise hide the only Apply/Discard affordance for real
-	 *  patches, and vice versa). `sync` distinguishes rows the webapp can resolve with Apply/Discard
-	 *  ("held" — durable patches are waiting) from rows that hold NOTHING ("uncapturable" — Apply
-	 *  there would be a lie; the webapp offers View) from rows the write ALREADY happened for
-	 *  ("divergence" — C1: nothing pending, nothing to Apply/Discard, only a critical notice + a
-	 *  named recovery capture). Non-blocking by design — AttentionEvent never flips agent status; the
-	 *  turn itself succeeded (or, for "divergence", already wrote). */
-	private raiseBoundarySyncAttention(rec: AgentRecord, sync: "held" | "uncapturable" | "divergence", summary: string, detail: string): void {
-		const kept = (rec.dto.attentionEvents ?? []).filter((e) => e.source !== "boundary-sync" || (e.sync ?? "held") !== sync);
-		rec.dto.attentionEvents = [...kept, { id: randomUUID(), summary, detail, source: "boundary-sync", sync, createdAt: Date.now() }];
-		this.emitAgent(rec);
-	}
-
-	/** `only` narrows the clear to one row kind — REQUIRED (N2): a blanket clear (no `only`, drop every
-	 *  boundary-sync row regardless of kind) used to be reachable by passing `undefined`, and the one
-	 *  call site that did (`boundaryTurnEnd`'s "applied" case, `spannedPrior ? undefined : "held"`) swept
-	 *  a critical "divergence" row on the very next clean turn — every ordinary consecutive turn has
-	 *  `spannedPrior` true, so a divergence notice was silently gone by the time an operator could act on
-	 *  it. A "divergence" row must persist until the operator explicitly resolves it (see
-	 *  `acknowledgeBoundarySyncDivergence`) or discards its retained capture — it is NEVER an
-	 *  acceptable target for an implicit clear, so removing the ability to omit `only` at all is the
-	 *  fail-closed fix: no future call site can reintroduce the blanket-clear bug even by accident. The
-	 *  apply/discard resolution paths clear "held" only — resolving the backlog says nothing about an
-	 *  "uncapturable" warning, whose turn's edits are still worktree-only; clearing it would silently
-	 *  dismiss a true statement. The turn-end path clears "uncapturable" once a spanning patch provably
-	 *  covered those edits (see boundaryTurnEnd's spannedPrior). */
-	private clearBoundarySyncAttention(rec: AgentRecord, only: "held" | "uncapturable" | "divergence"): void {
-		const events = rec.dto.attentionEvents ?? [];
-		const kept = events.filter((e) => e.source !== "boundary-sync" || (e.sync ?? "held") !== only);
-		if (kept.length === events.length) return;
-		rec.dto.attentionEvents = kept;
-		this.emitAgent(rec);
-	}
-
-	/**
-	 * N2: the explicit "I've looked at this" affordance a "divergence" row otherwise has no way to
-	 * resolve — `clearBoundarySyncAttention` can never target it implicitly (see above), and unlike a
-	 * "held" row there is no ledger entry an Apply/Discard call resolves; the write already happened,
-	 * there is nothing left to apply or drop, only a notice and a retained pre-write capture the
-	 * operator has (or hasn't) reconciled by hand. Acknowledging clears ONLY the "divergence" kind —
-	 * exactly the row this exists for — never "held"/"uncapturable", so it can never be used to paper
-	 * over a real pending backlog.
-	 */
 	async acknowledgeBoundarySyncDivergence(id: string, actor: Actor = LOCAL_ACTOR): Promise<{ ok: boolean; reason?: string }> {
-		const rec = this.agents.get(id);
-		if (!rec) return { ok: false, reason: "no such agent" };
-		const had = (rec.dto.attentionEvents ?? []).some((e) => e.source === "boundary-sync" && e.sync === "divergence");
-		if (!had) return { ok: true };
-		this.clearBoundarySyncAttention(rec, "divergence");
-		void this.recordAudit(actor, "boundary-sync.ack-divergence", id, "ok", "operator acknowledged a boundary-sync divergence notice");
-		return { ok: true };
+		return this.boundaryLane.acknowledgeDivergence(id, actor);
 	}
 
-	/**
-	 * Explicit apply affordance (POST /api/agents/:id/apply-held-sync). Re-runs the fail-closed
-	 * precondition with a FRESH capture (never the stale fingerprint the hold was raised with — the
-	 * real tree may have moved again since) and replays this agent's held patches in order; the
-	 * first conflict stops the run with everything after it still held. See boundary-sync.ts
-	 * `applyHeldNow` for why divergence is judged per patch here (the operator's click is the
-	 * authorization the auto path lacks).
-	 */
 	async applyHeldSync(id: string, actor: Actor = LOCAL_ACTOR): Promise<{ ok: boolean; applied: number; remaining: number; reason?: string; divergences?: { turn: number; paths: string[]; captureDir: string }[] }> {
-		const rec = this.agents.get(id);
-		if (!rec) return { ok: false, applied: 0, remaining: 0, reason: "no such agent" };
-		const realDir = await this.boundarySyncResolveDir(rec);
-		if (!realDir) return { ok: false, applied: 0, remaining: 0, reason: "this unit has no boundary sync (not a here-class session)" };
-		let result: Awaited<ReturnType<typeof applyHeldNow>> = { ok: false, applied: 0, remaining: 0, reason: "apply did not run" };
-		try {
-			await this.queueBoundarySync(rec, realDir, async () => {
-				result = await applyHeldNow(this.boundarySyncHeld, id, realDir);
-			});
-		} catch (err) {
-			// The chain rejected (e.g. the held ledger is unreadable — fail-closed, nothing applied
-			// beyond what `result` already recorded). `remaining` from the initializer would LIE
-			// ("Still held (0 turns)"), so recount best-effort before reporting.
-			const remaining = await this.boundarySyncHeld.listHeld(id).then((h) => h.length).catch(() => result.remaining);
-			result = { ok: false, applied: result.applied, remaining, reason: errText(err) };
-		}
-		if (result.ok && result.remaining === 0) {
-			// "held" only: resolving the backlog must not dismiss an "uncapturable" row — that warning
-			// is about a turn whose edits are STILL worktree-only, and it holds nothing to apply.
-			this.clearBoundarySyncAttention(rec, "held");
-		} else if (result.reason) {
-			this.raiseBoundarySyncAttention(rec, "held", `sync still held: ${result.reason}`, `${result.applied} applied, ${result.remaining} still held for ${realDir}. Held patches: ${this.boundarySyncHeld.root}`);
-		}
-		if (result.divergences && result.divergences.length > 0) {
-			// C1: at least one replayed patch wrote successfully but diverged from its expected result —
-			// critical, never auto-restored, one row naming every affected turn + capture location.
-			this.raiseBoundarySyncAttention(
-				rec,
-				"divergence",
-				`sync divergence detected across ${result.divergences.length} replayed turn${result.divergences.length === 1 ? "" : "s"}`,
-				result.divergences
-					.map((d) => `turn ${d.turn}: ${d.paths.join(", ")} (pre-write copy retained at ${d.captureDir})`)
-					.join("; ") + ` — nothing was rolled back automatically; compare each capture against the current file(s) by hand.`,
-			);
-			// Concern 02: a NEW divergence, discovered exactly once at THIS explicit replay (a resolved
-			// patch never re-enters the backlog, so a later Apply call can't rediscover the same one).
-			this.captureAutoFriction(rec.dto.id, realDir, "auto:boundary-sync-held", `boundary sync divergence detected across ${result.divergences.length} replayed turn${result.divergences.length === 1 ? "" : "s"} for ${realDir} (agent ${rec.dto.name})`);
-		}
-		void this.recordAudit(actor, "boundary-sync.apply", id, result.ok ? "ok" : "error", `${result.applied} applied, ${result.remaining} remaining${result.reason ? ` — ${result.reason}` : ""}`);
-		return result;
+		return this.boundaryLane.applyHeld(id, actor);
 	}
 
-	/**
-	 * Explicit discard affordance (POST /api/agents/:id/discard-held-sync) — the recovery path for a
-	 * backlog that can never apply cleanly (operator fixed the divergence by hand; crash between an
-	 * apply and its resolve marker makes replay fail `--check` forever). Without it a wedged oldest
-	 * patch auto-holds every later turn: auto-sync bricked for the session. Drops the pending write
-	 * only — the real tree is untouched and the session worktree keeps every edit. `patchId` narrows
-	 * the drop to one held patch; omitted, the agent's whole backlog is discarded.
-	 */
 	async discardHeldSync(id: string, patchId?: string, actor: Actor = LOCAL_ACTOR): Promise<{ ok: boolean; discarded: number; remaining: number; reason?: string }> {
-		const rec = this.agents.get(id);
-		if (!rec) return { ok: false, discarded: 0, remaining: 0, reason: "no such agent" };
-		const realDir = await this.boundarySyncResolveDir(rec);
-		if (!realDir) return { ok: false, discarded: 0, remaining: 0, reason: "this unit has no boundary sync (not a here-class session)" };
-		let result: { ok: boolean; discarded: number; remaining: number; reason?: string } = { ok: false, discarded: 0, remaining: 0, reason: "discard did not run" };
-		try {
-			// Same per-checkout chain as capture/apply: a discard must never interleave with a
-			// half-finished replay of the very patches it is dropping.
-			await this.queueBoundarySync(rec, realDir, async () => {
-				result = await discardHeldNow(this.boundarySyncHeld, id, patchId);
-			});
-		} catch (err) {
-			// Same honesty rule as applyHeldSync's catch: never report the initializer's counts as
-			// if they were observed — recount best-effort.
-			const remaining = await this.boundarySyncHeld.listHeld(id).then((h) => h.length).catch(() => result.remaining);
-			result = { ok: false, discarded: result.discarded, remaining, reason: errText(err) };
-		}
-		if (result.ok && result.remaining === 0) {
-			this.clearBoundarySyncAttention(rec, "held");
-		} else if (result.remaining > 0) {
-			this.raiseBoundarySyncAttention(
-				rec,
-				"held",
-				`sync held: ${result.remaining} turn${result.remaining === 1 ? "" : "s"} still held`,
-				`${result.discarded} discarded, ${result.remaining} still held for ${realDir}. Apply replays them in order after a fresh safety re-check; Discard drops them. Held patches: ${this.boundarySyncHeld.root}`,
-			);
-		}
-		void this.recordAudit(actor, "boundary-sync.discard", id, result.ok ? "ok" : "error", `${result.discarded} discarded, ${result.remaining} remaining${result.reason ? ` — ${result.reason}` : ""}`);
-		return result;
+		return this.boundaryLane.discardHeld(id, patchId, actor);
 	}
 
-	/** Boot: attention events are in-memory only, held patches are durable — re-raise the "sync
-	 *  held" row for every restored session that still has holds, and (C2) raise a REPO-SCOPED,
-	 *  discoverable notice — never just a log line — for holds whose agent no longer exists at all:
-	 *  these are exactly the sessions a `here` restart-reattach (`rekeyHeldSyncsOnReattach`) will
-	 *  later re-key onto a fresh id, so "no live owner yet" is a recoverable, expected state, not a
-	 *  loss. `orphanedBoundarySyncs()` is the durable, queryable half (GET /api/boundary-sync/orphaned
-	 *  in server.ts); the warn log is the immediate operational half — both name the exact patch
-	 *  files and the recovery path. */
-	private async reattachHeldSyncs(): Promise<void> {
-		// N3: recover any hold whose ledger-append failed and was never re-tracked before the daemon
-		// died/restarted (`HeldLedgerAppendError`'s `.patch` body survives, but with no ledger line —
-		// see `HeldSyncStore.sweepOrphanedPatches`'s doc for why this is the honest fix for the boot-
-		// sweep recovery this module has long CLAIMED but, before N3, never actually implemented). Runs
-		// before the ledger read below so a recovered hold shows up in `all` on this very boot.
-		const swept = await this.boundarySyncHeld.sweepOrphanedPatches().catch((err) => {
-			this.log("warn", `boundary-sync: boot sweep for ledgerless patch files failed (${errText(err)})`);
-			return { recovered: [], unrecoverable: [] };
-		});
-		if (swept.recovered.length > 0) {
-			this.log("info", `boundary-sync: boot sweep recovered ${swept.recovered.length} previously-untracked held patch(es) (a ledger-append failure survived a restart) — now visible under the normal held-sync affordances`);
-		}
-		if (swept.unrecoverable.length > 0) {
-			this.log("warn", `boundary-sync: boot sweep found ${swept.unrecoverable.length} orphaned patch file(s) with no recoverable metadata — inspect by hand: ${swept.unrecoverable.join(", ")}`);
-		}
-		// Minor follow-up: divergence-capture GC — C1's retained pre-write captures (retainDivergenceCapture)
-		// had no retention bound at all; bounded here at boot, same cadence as the patch-file sweep above.
-		const pruned = await pruneDivergenceCaptures(path.join(this.boundarySyncHeld.root, "divergence")).catch((err) => {
-			this.log("warn", `boundary-sync: divergence-capture prune failed (${errText(err)})`);
-			return { removed: 0 };
-		});
-		if (pruned.removed > 0) this.log("info", `boundary-sync: pruned ${pruned.removed} old divergence capture(s)`);
-		const all = await this.boundarySyncHeld.listAllHeld().catch((err) => {
-			// Boot must not die on a sick ledger, but swallowing it silently would hide real held
-			// patches behind a missing attention row — say so, loudly.
-			this.log("warn", `boundary-sync: could not read the held ledger at boot (${errText(err)}) — held patches (if any) have NO attention rows this tenure; inspect ${this.boundarySyncHeld.root}`);
-			return [];
-		});
-		if (all.length === 0) return;
-		const byAgent = new Map<string, HeldSync[]>();
-		for (const h of all) {
-			const bucket = byAgent.get(h.agentId);
-			if (bucket) bucket.push(h);
-			else byAgent.set(h.agentId, [h]);
-		}
-		for (const [agentId, held] of byAgent) {
-			const rec = this.agents.get(agentId);
-			if (rec) {
-				// N4-adjacent: gate on the record's LIVENESS only, never on `options.realTreePath` — a
-				// promoted session (S5) clears that field, but its pre-existing holds are still this
-				// session's own and must still surface here; `held[0]!.realDir` (the hold's own recorded
-				// checkout, straight off the ledger) is the honest source, not the live option.
-				const realDir = held[0]!.realDir;
-				this.raiseBoundarySyncAttention(
-					rec,
-					"held",
-					`sync held: ${held.length} turn${held.length === 1 ? "" : "s"} from before the daemon restart`,
-					`Held for ${realDir} — nothing touched your checkout. Apply replays them in order after a fresh safety re-check; Discard drops them (the session worktree keeps every edit).`,
-				);
-			} else {
-				const realDir = held[0]!.realDir;
-				const files = held.map((h) => h.patchFile).join(", ");
-				this.log(
-					"warn",
-					`boundary-sync: ${held.length} held patch(es) for a session that no longer exists (agent ${agentId}, checkout ${realDir}) — nothing was lost. ` +
-						`Recover by running \`glance here\` again on that checkout with a restart reattach — reaching this repo re-keys them onto your new session automatically. ` +
-						`Patch files: ${files} (ledger: ${this.boundarySyncHeld.root}).`,
-				);
-			}
-		}
-	}
-
-	/** C2: held boundary-sync patches whose owning agent isn't (or isn't yet) in the roster — a `here`
-	 *  session that hasn't reattached this tenure. Repo-scoped (`realDir`), not id-scoped: the operator
-	 *  recovers these by launching `glance here` again on the SAME checkout with a restart reattach
-	 *  (server.ts `POST /api/console { reattachOf }` → `rekeyHeldSyncsOnReattach`), which re-keys any
-	 *  hold whose recorded `realDir` matches the new session's — the old agent id itself is otherwise
-	 *  meaningless to them. Read-only, computed fresh from the durable ledger every call (cheap: this
-	 *  is a rare-event list, never a hot path). */
 	async orphanedBoundarySyncs(): Promise<{ agentId: string; realDir: string; count: number; patchFiles: string[] }[]> {
-		const all = await this.boundarySyncHeld.listAllHeld().catch(() => []);
-		const byAgent = new Map<string, HeldSync[]>();
-		for (const h of all) {
-			if (this.agents.has(h.agentId)) continue; // has a live owner — not orphaned
-			const bucket = byAgent.get(h.agentId);
-			if (bucket) bucket.push(h);
-			else byAgent.set(h.agentId, [h]);
-		}
-		return [...byAgent.entries()].map(([agentId, held]) => ({
-			agentId,
-			realDir: held[0]!.realDir,
-			count: held.length,
-			patchFiles: held.map((h) => h.patchFile),
-		}));
+		return this.boundaryLane.orphaned();
 	}
 
 	// ── Roster mutation ───────────────────────────────────────────────────────
@@ -9097,8 +8606,7 @@ export class SquadManager extends EventEmitter {
 			case "notify": {
 				// Operator/scriptable ingress (`glance notify`, cmux-research concern 03): non-blocking,
 				// never a PendingRequest — mirrors squad_attention/the harness "notify" wiring below.
-				const event: AttentionEvent = { id: randomUUID(), summary: cmd.summary, detail: cmd.detail, source: "notify", createdAt: Date.now() };
-				rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
+				this.attention.raise(rec, { summary: cmd.summary, detail: cmd.detail, source: "notify" }, { quiet: true });
 				this.append(rec, "system", `🔔 attention (${actor.id}): ${truncateLabel(cmd.summary, 200)}`);
 				void this.recordAudit(actor, "notify", cmd.id, "ok", truncateLabel(cmd.summary, 120));
 				this.emitAgent(rec);
@@ -9820,7 +9328,7 @@ export class SquadManager extends EventEmitter {
 				rec.dto.adopted = false; // OMPSQ-164: it ran ⇒ no longer a never-re-run adopted agent; resume normal verify→land
 				// Boundary sync (daily-onramp 03): capture the turn's baselines for `here`-class casual
 				// sessions (realTreePath marker). No-op for everything else — checked inside.
-				this.boundaryTurnStart(rec);
+				this.boundaryLane.turnStart(rec);
 				if (!rec.run) {
 					rec.run = new RunAccumulator({
 						agentId: rec.dto.id,
@@ -9964,7 +9472,7 @@ export class SquadManager extends EventEmitter {
 				// Boundary sync (daily-onramp 03): `agent_end` IS "turn finished" — apply this turn's
 				// patch to the operator's real checkout iff it provably hasn't moved since turn start,
 				// else hold + attention. `here`-class sessions only (realTreePath marker, checked inside).
-				this.boundaryTurnEnd(rec);
+				this.boundaryLane.turnEnd(rec);
 				break;
 			}
 			case "workflow_done":
@@ -10339,15 +9847,7 @@ export class SquadManager extends EventEmitter {
 		const summary = `Plane issue ${identifier} landed via an UNVERIFIED merge (out-of-band GitHub-UI merge, never re-run through the daemon's own gate) — NOT auto-closed; needs a human to confirm and close manually`;
 		const detail = ctx?.branch ? `branch ${ctx.branch}` : undefined;
 		const rec = ctx?.branch ? this.agentByBranch(ctx.branch) : undefined;
-		if (rec) {
-			try {
-				const event: AttentionEvent = { id: randomUUID(), summary, detail, source: "notify", createdAt: Date.now() };
-				rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
-				this.emitAgent(rec);
-			} catch (err) {
-				this.log("warn", `unverified-proof attention-lane attach failed for ${identifier} (non-fatal): ${errText(err)}`);
-			}
-		}
+		if (rec) this.attention.raise(rec, { summary, detail, source: "notify" });
 		try {
 			this.log("warn", `${summary}${detail ? ` — ${detail}` : ""}`);
 			this.automation.for("land", ctx?.repo ?? "unknown")({ durationMs: 0, level: "warn", detail: `${summary}${detail ? ` — ${detail}` : ""}` });
@@ -10886,6 +10386,78 @@ export class SquadManager extends EventEmitter {
 	 *  before writing). */
 	storedFeatureDecisions(id: string): FeatureDecision[] | undefined {
 		return this.decisionLedger.stored(id);
+	}
+
+	/** Starved-and-unacked issues (deepen 14) — derived fresh from the attempts ledger, so the
+	 *  action-items surface and the dispatch gate can never disagree. */
+	starvedIssueAttempts(): Array<{ issueId: string; identifier?: string; repo?: string; attempts: number; fails: number; lastAt: number }> {
+		// Effective (current-generation) counters — the surface must show the same numbers the
+		// verdict and the clear audit use, never cumulative history (codex finding).
+		return starvedIssues(this.stateDir).map(({ issueId, record }) => {
+			const e = effectiveEvidence(record);
+			return { issueId, identifier: record.identifier, repo: record.repo, attempts: e.attempts, fails: e.fails, lastAt: record.lastAt };
+		});
+	}
+
+	/** The audited operator clear verb (deepen 14, 3b-final items 3+4): stamps the ack + generation
+	 *  watermarks, writes BOTH audit backends with the prior verdict evidence and the operator's
+	 *  reason, awaited — a clear whose audit failed is reported as failed, never a silent success.
+	 *  Touches neither the dispatch ledger nor race eligibility (once-per-issue-ever stays spent —
+	 *  post-starvation a human is in the loop, strictly stronger than another race). */
+	async clearIssueStarvationVerdict(issueId: string, actor: Actor, reason?: string): Promise<"cleared" | "not-starved" | "audit-failed"> {
+		let cleared: ReturnType<typeof clearIssueStarvation>;
+		try {
+			cleared = clearIssueStarvation(this.stateDir, issueId, actor.id);
+		} catch (err) {
+			// Strict ledger (codex, recovery round): an unreadable ledger or a failed verdict write
+			// now THROWS instead of reporting a success that never persisted. The verdict (if any)
+			// stands; 503 tells the operator to retry.
+			this.log("warn", `starvation clear for ${issueId} failed — ledger read/write error: ${errText(err)}`);
+			return "audit-failed";
+		}
+		if (!cleared) return "not-starved";
+		const prior = cleared.prior;
+		// The audit reports the EFFECTIVE (current-generation) verdict the operator actually acked —
+		// cumulative counters would contradict the 3/3 the surface showed (codex finding).
+		const e = effectiveEvidence(prior);
+		const detail = `prior verdict: ${e.fails}/${e.attempts} judged attempts failed${prior.identifier ? ` (${prior.identifier})` : ""}${reason ? `; reason: ${truncateLabel(reason, 200)}` : "; no reason given"}`;
+		const entry = makeAuditEntry({ actor, action: "dispatch.starvation.cleared", target: issueId, outcome: "ok", detail });
+		try {
+			// STRICT audit write (grok, recovery round): recordAudit deliberately swallows file-append
+			// failures — an audit must never break the action it records. This verb's contract is the
+			// inverse (the action must not survive its audit), so the file backend is written directly
+			// and unswallowed; in file mode store.appendAudit is a documented no-op, so this direct
+			// write is the ONLY real backend and the old recordAudit path made the rollback dead code.
+			await appendAudit(this.stateDir, entry);
+			await this.store.appendAudit({ actor: actor.id, action: "dispatch.starvation.cleared", target: issueId, detail: { prior: { attempts: e.attempts, fails: e.fails }, reason: reason ?? null } });
+		} catch (err) {
+			// Atomicity by compensation (codex finding): a clear whose audit failed must not survive —
+			// restore the pre-clear row so the verdict stands and the operator can retry the endpoint.
+			try {
+				restoreIssueAttemptRecord(this.stateDir, issueId, prior);
+			} catch (restoreErr) {
+				// Strict write can fail here too: the clear persisted but its audit did not, and the
+				// rollback could not undo it. The loudest honest signal available short of crashing.
+				this.log("error", `starvation clear for ${issueId}: audit failed AND rollback failed — clear persisted UNAUDITED: ${errText(restoreErr)}`);
+				return "audit-failed";
+			}
+			// The disk audit may already carry the "cleared" line (it lands before the DB backend) —
+			// append the compensation so the trail tells the truth. Best-effort recordAudit is right
+			// here: the rollback itself must never fail on its own audit (codex #5, recovery round).
+			await this.recordAudit(actor, "dispatch.starvation.clear-rolled-back", issueId, "error", `audit backend failed, verdict restored: ${errText(err)}`);
+			this.log("warn", `starvation clear for ${issueId} rolled back — audit write failed: ${errText(err)}`);
+			return "audit-failed";
+		}
+		// Broadcast only after both backends landed — a rolled-back clear must not have announced itself.
+		this.emit("event", { type: "audit", entry } satisfies SquadEvent);
+		// Make "let auto-dispatch try again" TRUE (codex finding, recovery round): the dispatcher's
+		// already-handled gate runs before difficultyFor and its ledger was add-only, so a cleared
+		// issue was never reconsidered. Forget it through the LIVE dispatcher (shared ledger
+		// instance — a second openSetLedger would resurrect the id from the stale in-memory copy);
+		// with auto-dispatch off no live instance exists, so an ad-hoc open is safe.
+		if (this.dispatcher) this.dispatcher.forgetIssue(issueId);
+		else openDispatchLedger(this.stateDir).delete(issueId);
+		return "cleared";
 	}
 
 	// ── operator-attention substrate (comprehension concern 01) ──────────────────────────────────
@@ -11447,7 +11019,7 @@ export class SquadManager extends EventEmitter {
 			liveArmed,
 			activeAgents: occupyingAgents(this.list()),
 			persistFailures: this.store.saveFailures?.() ?? 0,
-			projectionFailures: this.projectionFailures,
+			projectionFailures: this.cardProjector.projectionFailures,
 			// Shadow-exit surface (adw-factory-borrows concern 09): raw events, not rollup rows — the
 			// scoreboard needs a JOINT filter (e.g. mode=shadow AND action=ask/deny) a per-tag-key rollup
 			// breakdown can't answer. Same window every other row on this strip uses.
@@ -12002,8 +11574,7 @@ export class SquadManager extends EventEmitter {
 			// append with no way to surface it — now also a real attention row for non-omp harnesses
 			// (which have no host-tool channel, so squad_attention is unreachable for them).
 			this.append(rec, "system", `(${req.notifyType ?? "info"}) ${req.message}`);
-			const event: AttentionEvent = { id: randomUUID(), summary: req.message, detail: undefined, source: "harness", createdAt: Date.now() };
-			rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
+			this.attention.raise(rec, { summary: req.message, source: "harness" }, { quiet: true });
 			// emitAgent fires unconditionally at the end of this method (below) — no extra broadcast needed here.
 		} else if (BLOCKING_UI_METHODS[req.method]) {
 			added = {
@@ -12401,8 +11972,7 @@ export class SquadManager extends EventEmitter {
 			return;
 		}
 		const detail = typeof args.detail === "string" ? args.detail : undefined;
-		const event: AttentionEvent = { id: randomUUID(), summary, detail, source: "tool", createdAt: Date.now() };
-		rec.dto.attentionEvents = [...(rec.dto.attentionEvents ?? []), event];
+		this.attention.raise(rec, { summary, detail, source: "tool" }, { quiet: true });
 		this.append(rec, "system", `🔔 attention: ${truncateLabel(summary, 200)}`, { status: "ok", tool: { callId: call.id, name: ATTENTION_TOOL, args: call.arguments, argsText: safeJson(call.arguments) } });
 		rec.agent.respondHostTool(call.id, "attention recorded — continue working, a human will look when they can");
 		void this.recordAudit(agentActor(rec.dto.id), "attention.raised", rec.dto.id, "ok", truncateLabel(summary, 120));
@@ -12472,7 +12042,7 @@ export class SquadManager extends EventEmitter {
 	 *  redaction chokepoint doesn't already cover (#lifecycle-truth concern 02). */
 	private setPending(rec: AgentRecord, next: PendingRequest[], reason: DerivedReason, cause?: TransitionCause, opts?: { callerOwnsStatus?: boolean }): void {
 		const redacted = next.map((p) => ({ ...p, title: redact(p.title), message: p.message === undefined ? undefined : redact(p.message) }));
-		this.emitNeedsYouProjection(rec, redacted, reason);
+		this.cardProjector.needsYou(rec, redacted, reason);
 		rec.dto.pending = redacted;
 		// Debounced persist trigger (concern 04) — scheduled regardless of the callerOwnsStatus branch
 		// below, since `pending` already changed above either way. Suppressed during the replay settle
@@ -13114,7 +12684,7 @@ export class SquadManager extends EventEmitter {
 	// room-scoping this lane owns: only units of the call's own channel are visible or addressable.
 
 	/** Room roster for the fleet lane: every live unit whose room is this channel (a unit with no
-	 *  channelId belongs to the default room, mirroring `projectUnitTranscriptEvent`'s own rule). */
+	 *  channelId belongs to the default room, mirroring `UnitCardProjector.event`'s own rule). */
 	private voiceFleetUnits(channelId: string): FleetUnitView[] {
 		return this.list()
 			.filter((dto) => (dto.channelId ?? DEFAULT_CHANNEL_ID) === channelId)
@@ -13426,11 +12996,12 @@ export class SquadManager extends EventEmitter {
 	}
 
 	/** Project a card to the unit's room channel WITHOUT writing a row into the unit's transcript.
-	 *  The synthetic entry carries no `id`, so `projectionRefs` correctly omits `entryId` — there is no
-	 *  transcript row to link back to, and claiming one would be a dead reference in the card's door. */
+	 *  The synthetic entry carries no `id`, so the projector's own `refs()` correctly omits `entryId`
+	 *  — there is no transcript row to link back to, and claiming one would be a dead reference in the
+	 *  card's door. */
 	private projectLifecycleCard(rec: AgentRecord, kind: string, text: string, payload: unknown): void {
 		const synthetic: TranscriptEntry = { kind: "system", text: this.eventText(text), ts: Date.now(), status: "ok", format: "stage", event: { kind, issuer: EVENT_ISSUER_MANAGER, payload } } as TranscriptEntry;
-		void this.projectUnitTranscriptEvent(rec, synthetic);
+		void this.cardProjector.event(rec, synthetic);
 	}
 
 	private emitUnitTranscriptEvent(id: string | undefined, kind: string, text: string, payload: unknown): void {
@@ -13438,7 +13009,7 @@ export class SquadManager extends EventEmitter {
 		const rec = this.agents.get(id);
 		if (!rec || !Array.isArray(rec.transcript)) return;
 		const entry = this.append(rec, "system", this.eventText(text), { status: "ok", format: "stage", event: { kind, issuer: EVENT_ISSUER_MANAGER, payload } });
-		void this.projectUnitTranscriptEvent(rec, entry);
+		void this.cardProjector.event(rec, entry);
 	}
 
 	/** Resolve an event's subject before routing it. Missing bindings are failures, never root fallbacks. */
@@ -13451,7 +13022,10 @@ export class SquadManager extends EventEmitter {
 		}
 	}
 
-	private async ensureProjectedNode(rec: AgentRecord): Promise<{ id: string }> {
+	// Takes the projector's structural slice rather than AgentRecord: the projector's `node` dep
+	// calls this with a ProjectedUnitSession, and the slice declares exactly what this reads
+	// (dto + options.task) — every AgentRecord caller satisfies it for free.
+	private async ensureProjectedNode(rec: ProjectedUnitSession): Promise<{ id: string }> {
 		const existing = await this.nodeStore.get(rec.dto.id);
 		if (existing) return existing;
 		return this.nodeStore.create({
@@ -13463,127 +13037,6 @@ export class SquadManager extends EventEmitter {
 			goal: rec.options.task,
 			createdAt: Date.now(),
 		});
-	}
-
-	private projectionDoorSurface(kind: string): string {
-		switch (kind) {
-			case TRANSCRIPT_EVENT_NEEDS_YOU:
-				return "intervence";
-			case TRANSCRIPT_EVENT_GATE_VERDICT:
-				return "gate-verdict";
-			case TRANSCRIPT_EVENT_LAND_MERGE:
-				return "land-merge";
-			case TRANSCRIPT_EVENT_PLAN_CARD:
-				return "plan";
-			case TRANSCRIPT_EVENT_LAND_ATTEMPT:
-			case TRANSCRIPT_EVENT_LAND_ASSESSMENT:
-				return "land";
-			default:
-				return "unit";
-		}
-	}
-
-	private projectionPayload(entry: TranscriptEntry): Record<string, unknown> {
-		const payload = entry.event?.payload;
-		return payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
-	}
-
-	private projectionRefs(rec: AgentRecord, entry: TranscriptEntry): Record<string, unknown> {
-		const objectPayload = this.projectionPayload(entry);
-		const refs: Record<string, unknown> = { unitId: rec.dto.id };
-		if (entry.id) refs.entryId = entry.id;
-		for (const [from, to] of [["featureId", "planId"], ["planPath", "planPath"], ["candidateId", "candidateId"], ["attemptId", "landId"], ["issueId", "issueId"], ["issueIdentifier", "issueIdentifier"]] as const) {
-			const value = objectPayload[from];
-			if (typeof value === "string" && value) refs[to] = value;
-		}
-		return refs;
-	}
-
-	private needsYouFace(rec: AgentRecord, payload: Record<string, unknown>, entry: TranscriptEntry): Record<string, unknown> {
-		const pendingStatus = typeof payload.status === "string" ? payload.status : undefined;
-		const title = typeof payload.title === "string" && payload.title ? payload.title : "operator input";
-		const accountableHuman = typeof payload.accountableHuman === "string" && payload.accountableHuman ? payload.accountableHuman : undefined;
-		const message = typeof payload.message === "string" && payload.message ? payload.message : undefined;
-		const createdAt = typeof payload.createdAt === "number" && Number.isFinite(payload.createdAt) ? payload.createdAt : entry.ts;
-		const ageMs = Math.max(0, entry.ts - createdAt);
-		const age = ageMs < 60_000 ? "just now" : `${Math.floor(ageMs / 60_000)}m`;
-		const resolved = pendingStatus === "resolved";
-		// A resolved card is one of two facts, and they are not close: somebody answered, or the unit
-		// went away without an answer. `answered` is stamped by emitNeedsYouProjection from the same
-		// `reason` that already distinguishes them; an OLD card carries no flag and is read as
-		// answered, which is what it always claimed.
-		const abandoned = resolved && payload.answered === false;
-		// Concern 19 wants ONE NAMED accountable human, and a name is the point. In file mode the actor
-		// id is literally "local", so appending it produces "local is accountable", which names nobody
-		// and lengthens every headline to say it. An unnamed operator is left off rather than rendered
-		// as a name — an identifier that identifies no one is worse than silence, because it reads like
-		// an answer. The accountable id still rides on the payload for anyone who can resolve it.
-		const namedTitle = accountableHuman && accountableHuman !== "local" ? `${title} — ${accountableHuman} is accountable.` : title;
-		return {
-			unitId: rec.dto.id,
-			unitName: rec.dto.name,
-			eventKind: entry.event?.kind,
-			pendingId: typeof payload.pendingId === "string" ? payload.pendingId : undefined,
-			pendingStatus,
-			accountableHuman,
-			title: abandoned ? `Never answered · ${namedTitle}` : resolved ? `Resolved · ${namedTitle}` : `Needs you · ${namedTitle}`,
-			eyebrow: abandoned ? "Never answered" : resolved ? "Resolved" : "Needs you",
-			// A card that says the same sentence three times (title, body, "why stopped") reads as
-			// broken, and for approval-shaped pendings `message` IS the title. Say it once.
-			body: message && message.trim() !== title.trim() ? message : undefined,
-			detail: abandoned
-				? "The unit stopped before anyone replied. Nothing is waiting on you for it, and nothing came of it."
-				: resolved
-					? "Follow-up resolution card. Original pending card remains unchanged."
-					: "Click to step into the agent.",
-			// Abandoned is NOT success. A green card for a question nobody answered is the room
-			// congratulating itself for losing something.
-			tone: abandoned ? "neutral" : resolved ? "success" : "warning",
-			pinned: {
-				agent: rec.dto.name || rec.dto.id,
-				age,
-			},
-		};
-	}
-
-	private projectionFace(rec: AgentRecord, entry: TranscriptEntry): Record<string, unknown> {
-		const objectPayload = this.projectionPayload(entry);
-		const customFace = objectPayload.face && typeof objectPayload.face === "object" && !Array.isArray(objectPayload.face) ? objectPayload.face as Record<string, unknown> : {};
-		if (entry.event?.kind === TRANSCRIPT_EVENT_NEEDS_YOU) return this.needsYouFace(rec, objectPayload, entry);
-		if (entry.event?.kind === TRANSCRIPT_EVENT_TOKEN_BURN_SNAPSHOT) return tokenBurnFace(objectPayload as never);
-		return {
-			...customFace,
-			unitId: rec.dto.id,
-			unitName: rec.dto.name,
-			status: typeof customFace.status === "string" ? customFace.status : rec.dto.status,
-			repo: rec.dto.repo,
-			branch: rec.dto.branch,
-			issue: rec.dto.issue ? { id: rec.dto.issue.id, identifier: rec.dto.issue.identifier, name: rec.dto.issue.name } : undefined,
-			eventKind: entry.event?.kind,
-			title: typeof customFace.title === "string" ? customFace.title : entry.text,
-			stage: typeof objectPayload.stage === "string" ? objectPayload.stage : undefined,
-			sha: typeof objectPayload.sha === "string" ? objectPayload.sha : typeof objectPayload.resultCommit === "string" ? objectPayload.resultCommit : rec.dto.proof?.commit,
-			target: typeof objectPayload.target === "string" ? objectPayload.target : typeof objectPayload.baseRef === "string" ? objectPayload.baseRef : "HEAD",
-			risk: typeof objectPayload.risk === "string" ? objectPayload.risk : typeof objectPayload.riskTier === "string" ? objectPayload.riskTier : typeof objectPayload.code === "string" ? objectPayload.code : undefined,
-			recommendation: typeof objectPayload.recommendation === "string" ? objectPayload.recommendation : typeof objectPayload.recommendedAction === "string" ? objectPayload.recommendedAction : undefined,
-			detail: typeof objectPayload.detail === "string" ? objectPayload.detail : typeof objectPayload.message === "string" ? objectPayload.message : undefined,
-			outcome: typeof objectPayload.outcome === "string" ? objectPayload.outcome : typeof objectPayload.prState === "string" ? objectPayload.prState : undefined,
-			mode: typeof objectPayload.mode === "string" ? objectPayload.mode : undefined,
-			prUrl: typeof objectPayload.prUrl === "string" ? objectPayload.prUrl : undefined,
-			prNumber: typeof objectPayload.prNumber === "number" || typeof objectPayload.prNumber === "string" ? objectPayload.prNumber : undefined,
-			doneProofVerified: typeof objectPayload.doneProofVerified === "string" ? objectPayload.doneProofVerified : undefined,
-			verdict: typeof objectPayload.verdict === "string" ? objectPayload.verdict : undefined,
-			ok: typeof objectPayload.ok === "boolean" ? objectPayload.ok : undefined,
-			merged: typeof objectPayload.merged === "boolean" ? objectPayload.merged : undefined,
-			pendingId: typeof objectPayload.pendingId === "string" ? objectPayload.pendingId : undefined,
-			pendingStatus: typeof objectPayload.status === "string" ? objectPayload.status : undefined,
-			validation: entry.event?.kind === TRANSCRIPT_EVENT_GATE_VERDICT ? objectPayload : undefined,
-			agreement: typeof objectPayload.agreement === "number" ? objectPayload.agreement : undefined,
-			confidence: typeof objectPayload.confidence === "number" ? objectPayload.confidence : undefined,
-			perCriterion: Array.isArray(objectPayload.perCriterion) ? objectPayload.perCriterion : undefined,
-			planName: typeof objectPayload.planName === "string" ? objectPayload.planName : undefined,
-			concernCount: typeof objectPayload.concernCount === "number" ? objectPayload.concernCount : undefined,
-		};
 	}
 
 	private async emitFleetTokenBurnRollup(verdict: CostVerdict): Promise<void> {
@@ -13599,129 +13052,6 @@ export class SquadManager extends EventEmitter {
 			this.emit("event", { type: "channel-entry", channelId: DEFAULT_CHANNEL_ID, entry: card } satisfies SquadEvent);
 		} catch (err) {
 			this.log("warn", `fleet token-burn rollup failed: ${errText(err)}`);
-		}
-	}
-
-	private async projectUnitTranscriptEvent(rec: AgentRecord, entry: TranscriptEntry): Promise<void> {
-		const event = entry.event;
-		if (!event?.kind) return;
-		if (!isTranscriptEventKind(event.kind)) {
-			if (!this.warnedUnknownTranscriptEventKinds.has(event.kind)) {
-				this.warnedUnknownTranscriptEventKinds.add(event.kind);
-				this.log("warn", `projection ${rec.dto.id}: unknown transcript event kind "${event.kind}" — skipped (newer daemon, or unregistered kind; logged once)`);
-			}
-			return;
-		}
-		const nodeId = await this.projectedNodeId(rec);
-		if (!nodeId) return;
-		try {
-			const input = {
-				authorActor: "manager",
-				kind: "system" as const,
-				format: "stage" as const,
-				text: entry.text,
-				event: {
-					kind: event.kind,
-					payload: {
-						refs: this.projectionRefs(rec, entry),
-						doorSurface: this.projectionDoorSurface(event.kind),
-						face: this.projectionFace(rec, entry),
-					},
-				},
-			};
-			// An escalation surfaces in the unit's ROOM, which is the channel it was spawned from —
-			// NOT unconditionally in #fleet. #fleet is org-public, so routing every escalation there
-			// would publish a private room's needs-you, gate and land cards to the whole org.
-			const room = rec.options.channelId ?? rec.dto.channelId ?? DEFAULT_CHANNEL_ID;
-			// Provenance travels WITH the card and is checked before it is written. A unit may say
-			// anything about itself and nothing about anyone else, so a card whose subject is a
-			// different node is a forgery regardless of which emit site produced it.
-			const provenance: CardProvenance = {
-				nodeId,
-				agentId: rec.dto.id,
-				evidenceIds: Object.values(this.projectionRefs(rec, entry)).filter((ref): ref is string => typeof ref === "string" && ref.length > 0),
-			};
-			assertAuthentic(event.kind, provenance, nodeId);
-			const projectedInput = { ...input, event: { ...input.event, payload: { ...input.event.payload, provenance } } };
-			const card = projectsToRoom(event.kind)
-				? await this.channelStore.appendManager(room, projectedInput)
-				: await this.channelStore.appendNodeManager(nodeId, projectedInput, rec.options.channelId ?? rec.dto.channelId);
-			this.emit("event", { type: "channel-entry", channelId: card.channelId, entry: card } satisfies SquadEvent);
-		} catch (err) {
-			this.projectionFailures++;
-			// A forgery is not a transient failure and must not read as one in the log. A projection that
-			// could not be written is worth retrying; a card that claimed to be about someone else's work
-			// is worth investigating.
-			const label = err instanceof ForgedCardError ? "REFUSED as forged" : "failed";
-			this.log("warn", `projection ${rec.dto.id}/${event.kind} → ${nodeId} ${label} (${this.projectionFailures} total): ${errText(err)}`);
-		}
-	}
-
-	/**
-	 * Announce a pending ONCE — not once per daemon restart.
-	 *
-	 * Seen live, in the room, on real data: `gate_1` was announced thirteen times and `gate_2` three,
-	 * for two questions. The timestamps matched the daemon's restarts exactly. On boot a record is
-	 * rebuilt with an empty `pending`, replay re-adds the outstanding requests, and the id-diff below
-	 * correctly reports every one of them as new — because to a freshly constructed record, it is.
-	 *
-	 * The room's own fold hides the repeats, which is why this survived: the SCREEN looked right. But
-	 * the channel is the durable record, and everything else reading it — search, the weekly episode,
-	 * a digest, anyone scrolling back — saw one unanswered question thirteen times. A restart is not
-	 * news about the work.
-	 *
-	 * `this.settling` is the existing replay-window marker; it already suppresses the PERSIST directly
-	 * below the call site, for the same reason and in the same words ("a ghost pending rebuilt by ring
-	 * replay must never resurrect a stale question"). This extends that reasoning to the projection,
-	 * which is where a person actually meets it.
-	 *
-	 * Resolutions are deliberately NOT suppressed. A question that was answered while the daemon was
-	 * down is news, and the worse failure is a room still showing something as waiting when it is not.
-	 */
-	private emitNeedsYouProjection(rec: AgentRecord, next: PendingRequest[], reason?: DerivedReason): void {
-		const replaying = this.settling.has(rec.dto.id);
-		const previous = new Map(rec.dto.pending.map((request) => [request.id, request]));
-		const upcoming = new Map(next.map((request) => [request.id, request]));
-		for (const request of next) {
-			if (previous.has(request.id)) continue;
-			// A pending restored by replay was announced before the restart. Re-announcing it says the
-			// fleet stopped again, which it did not.
-			if (replaying) continue;
-			if (!isRoomWorthyPending(request)) continue;
-			this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, `${this.safeEventLabel(request.title)} — ${this.safeEventLabel(rec.dto.name)} stopped rather than guess. Everything else in the fleet is still moving.`, {
-				status: "pending",
-				pendingId: request.id,
-				gateClass: gateClassOf(request),
-				title: request.title,
-				accountableHuman: this.operator.id,
-				message: request.message,
-				createdAt: request.createdAt,
-				agentId: rec.dto.id,
-			});
-		}
-		for (const request of previous.values()) {
-			if (upcoming.has(request.id)) continue;
-			// Symmetric with the emit above: a pending that never became a card must never emit a
-			// resolution card, or the room fills with orphan "resolved" faces for facts it never showed.
-			if (!isRoomWorthyPending(request)) continue;
-			// A pending goes away for two very different reasons and the card said "is answered" for
-			// both. `pending-cancel` is the unit being stopped, killed, reaped or replay-pruned —
-			// nobody answered it and nothing is picking the work back up. Telling a person their
-			// question was answered when it was abandoned is the room lying about the one thing it
-			// exists to be trusted on. The distinction was already in `reason`; it was just not read.
-			const answered = reason !== "pending-cancel";
-			this.emitUnitTranscriptEvent(rec.dto.id, TRANSCRIPT_EVENT_NEEDS_YOU, answered
-				? `${this.safeEventLabel(request.title)} is answered. ${this.safeEventLabel(rec.dto.name)} picks the work back up from where it stopped.`
-				: `${this.safeEventLabel(request.title)} went away without being answered — ${this.safeEventLabel(rec.dto.name)} stopped before anyone replied. Nothing is waiting on you for it any more, and nothing came of it either.`, {
-				status: "resolved",
-				answered,
-				pendingId: request.id,
-				gateClass: gateClassOf(request),
-				title: request.title,
-				accountableHuman: this.operator.id,
-				createdAt: request.createdAt,
-				agentId: rec.dto.id,
-			});
 		}
 	}
 

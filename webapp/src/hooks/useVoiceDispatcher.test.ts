@@ -285,7 +285,7 @@ describe('MAJOR-2(a): onSpokenSummary role discriminator', () => {
     await dispatchPromptAgent(session, 'call-1', 'ship the fix', refs, deps);
 
     expect(capturedClientTurnId).toBeTruthy();
-    expect(spokenSummaries).toEqual([{ role: 'user', text: 'ship the fix', clientTurnId: capturedClientTurnId }]);
+    expect(spokenSummaries).toEqual([{ role: 'user', text: 'ship the fix', clientTurnId: capturedClientTurnId! }]);
   });
 
   test('sweepPromptWatchers reports a completion narration as role:"model" (no clientTurnId)', () => {

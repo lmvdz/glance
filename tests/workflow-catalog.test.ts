@@ -25,7 +25,7 @@ test("workflow catalog includes the autonomy meta-workflow and guardrails", () =
 
 test("workflowSnapshot returns live workflow runs with progress", () => {
 	const snap = workflowSnapshot([
-		agent({ workflow: { path: "research-plan-implement" }, workflowState: { goal: "ship", currentNode: "implement", context: { goal: "ship", artifacts: {}, attempts: {} }, rollup: [{ label: "Research", status: "completed" }, { label: "Implement", status: "in_progress" }] } }),
+		agent({ workflow: { path: "research-plan-implement" }, workflowState: { goal: "ship", currentNode: "implement", visits: {}, vars: {}, index: 0, rollup: [{ label: "Research", status: "completed" }, { label: "Implement", status: "in_progress" }] } }),
 		agent({ id: "plain", kind: "omp-operator" }),
 	]);
 

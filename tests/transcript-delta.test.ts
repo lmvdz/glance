@@ -7,7 +7,7 @@ import { settleRunningEntries, transcriptSince } from "../src/transcript-delta.t
 import type { TranscriptEntry } from "../src/types.ts";
 
 function e(seq: number | undefined, text: string): TranscriptEntry {
-	return { seq, kind: "text", text, ts: 0 } as TranscriptEntry;
+	return { seq, kind: "text", text, ts: 0 } as unknown as TranscriptEntry;
 }
 
 test("returns only entries with seq strictly greater than since", () => {

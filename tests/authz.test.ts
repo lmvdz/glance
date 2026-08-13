@@ -124,6 +124,70 @@ test("applyCommand: operator denied destructive ops (RbacDenied + audited); admi
 			audits.push({ actor: e.actor, action: e.action });
 		},
 		async appendUsage() {},
+		async loadTranscripts() {
+			return {};
+		},
+		async saveTranscripts() {},
+		async loadFeatures() {
+			return [];
+		},
+		async saveFeatures() {},
+		async loadCapabilities() {
+			return {} as never;
+		},
+		async saveCapabilities() {},
+		async listChannels() {
+			return [];
+		},
+		async getChannel() {
+			return undefined;
+		},
+		async putChannel() {},
+		async listNodes() {
+			return [];
+		},
+		async getNode() {
+			return undefined;
+		},
+		async putNode() {},
+		async bindNodeChannel() {
+			return undefined;
+		},
+		async listNodeRecords() {
+			return [];
+		},
+		async putNodeRecord() {},
+		async deleteNodeRecords() {
+			return 0;
+		},
+		async listDelegationGrants() {
+			return [];
+		},
+		async putDelegationGrant() {},
+		async listPlanProposals() {
+			return [];
+		},
+		async putPlanProposal() {},
+		async listChannelEntries() {
+			return [];
+		},
+		async searchChannelEntries() {
+			return [];
+		},
+		async appendChannelEntry(entry) {
+			return { ...entry, seq: 0 };
+		},
+		async nextChannelSeq() {
+			return 0;
+		},
+		async listChannelMemberships() {
+			return [];
+		},
+		async putChannelMembership() {},
+		async getChannelReadCursor() {
+			return undefined;
+		},
+		async putChannelReadCursor() {},
 	};
 	const mgr = new SquadManager({ stateDir: dir, store });
 	await mgr.start();

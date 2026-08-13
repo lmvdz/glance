@@ -12,7 +12,7 @@ function entry(action: string, extra: Partial<AuditEntry> = {}): AuditEntry {
 }
 
 function agent(id: string, name: string): AgentDTO {
-  return { id, name, status: 'working', repo: '/r', worktree: '/w', pending: [], lastActivity: 0 } as AgentDTO;
+  return { id, name, status: 'working', repo: '/r', worktree: '/w', pending: [], lastActivity: 0 } as unknown as AgentDTO;
 }
 
 // ───────────────────────────── shortTarget ─────────────────────────────

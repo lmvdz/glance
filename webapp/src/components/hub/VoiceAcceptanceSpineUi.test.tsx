@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { VoiceCallHudView } from './VoiceCallHud';
 import { VoiceStatusRegion } from './VoiceStatusRegion';
 import { VoiceDecisionDoor } from './VoiceDecisionDoor';
 import { VoiceArtifactsList } from './VoiceArtifacts';
@@ -176,26 +175,10 @@ describe('concern 04 / point 9 — the status region: screen-reader announcement
   });
 });
 
-describe('concern 04 / point 9 — the call HUD: honest ended state, reduced motion, real controls', () => {
-  test('a live call shows real mute/end controls with labels', () => {
-    const html = renderToStaticMarkup(
-      <VoiceCallHudView binding={SPINE_BINDING_LIVE} loading={false} starting={false} ending={false} muted={false} muteBusy={false} controlsAvailable now={10_000} onStart={noop} onEnd={noop} onToggleMute={noop} />,
-    );
-    assertsReducedMotion(html);
-    expect(html).toContain('aria-label="Mute the microphone"');
-    expect(html).toContain('aria-label="End the call"');
-  });
-
-  test('after broker-exit, the HUD reflects the ended state truthfully — no live controls offered on a dead call', () => {
-    const html = renderToStaticMarkup(
-      <VoiceCallHudView binding={SPINE_BINDING_ENDED} loading={false} starting={false} ending={false} muted={false} muteBusy={false} controlsAvailable={false} now={10_000} onStart={noop} onEnd={noop} onToggleMute={noop} />,
-    );
-    assertsReducedMotion(html);
-    expect(html).not.toContain('aria-label="Mute the microphone"');
-    expect(html).not.toContain('aria-label="End the call"');
-  });
-});
-
+// The call-HUD describe that stood here tested VoiceCallHudView — a component with ZERO
+// production render sites since the composer icon-row replacement (RoomCallIconControls, whose
+// live mute/end contract Composer.test.tsx pins). Deleted with the component (concern 25);
+// the spine's decision-door and status-region contracts above are the live assertions.
 describe('concern 04 / point 9 — the artifacts index: this spine\'s immutable snapshot, narrow viewport, reduced motion', () => {
   test('the findings.md snapshot from this run renders in the current-run group with its pinned content hash', () => {
     const groups = groupArtifacts([SPINE_ARTIFACT], SPINE_ARTIFACT.callId);

@@ -11,7 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { restActionTier } from "../src/authz.ts";
 import { FrictionLog, frictionPath } from "../src/friction-log.ts";
-import { canonicalRepoRoot } from "../src/index.ts";
+import { canonicalRepoRoot } from "../src/cli/client.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import { SquadServer } from "../src/server.ts";
 import { parseSlash, SquadTui } from "../src/tui.ts";

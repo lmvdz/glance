@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { renderAgentRoster } from "../src/index.ts";
+import { renderAgentRoster } from "../src/cli/render.ts";
 import type { AgentDTO } from "../src/types.ts";
 
 function agent(overrides: Partial<AgentDTO> = {}): AgentDTO {

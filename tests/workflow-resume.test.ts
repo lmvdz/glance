@@ -166,7 +166,7 @@ test("poison cap: a cold resume AT the attempt cap escalates instead of re-runni
 	const exec = new RecordingExecutor();
 	const escalated: string[] = [];
 	const resume: WorkflowRunState = { goal: "g", currentNode: "b", visits: { start: 1, a: 1, b: 1 }, vars: {}, index: 3, rollup: [], cold: true, resumeAttempts: 3 };
-	const result = await new WorkflowEngine(wf, exec).run("g", { resume, escalate: (r) => escalated.push(r) });
+	const result = await new WorkflowEngine(wf, exec).run("g", { resume, escalate: (r) => { escalated.push(r); } });
 	expect(result.outcome).toBe("failed");
 	expect(result.reason).toContain("poison cap");
 	expect(escalated).toHaveLength(1);

@@ -71,7 +71,7 @@ function seed(mgr: InstanceType<typeof TestManager>, id: string, over: Partial<P
 		messageCount: 0,
 	};
 	const options: PersistedAgent = { id, name: id, repo, worktree, branch, approvalMode: "yolo", ...over };
-	mgr.agents.set(id, { dto, agent: undefined as never, options, transcript: [], assistantBuf: "", streaming: false, subs: new SubagentTracker() });
+	mgr.agents.set(id, { dto, agent: undefined as never, options, transcript: [], assistantBuf: "", thinkingBuf: "", streaming: false, subs: new SubagentTracker(), toolEntries: new Map() });
 }
 
 const ENV_KEYS = ["OMP_SQUAD_WORKTREE_GRACE_MS", "OMP_SQUAD_WORKTREE_REAP"] as const;

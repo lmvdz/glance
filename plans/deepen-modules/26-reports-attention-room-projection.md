@@ -1,5 +1,5 @@
 # Room projection for reports / attentionEvents
-STATUS: open
+STATUS: needs-lars
 PRIORITY: p1
 REPOS: omp-squad
 COMPLEXITY: architectural (~350–450 lines, mostly patterned)
@@ -19,6 +19,19 @@ emitNeedsYouProjection documents (the "announced thirteen times" bug). Action-be
 PRODUCT GATE (needs Lars, recorded here, does not block the daemon-side chokepoint work which
 is concern 19): does a non-blocking proposal earn a room card at all? DIRECTION.md's human
 contract says an over-populated needs-you lane is itself a bug — the design must ration.
+
+## needs-lars (2026-08-11, round 3 iteration 10)
+THE OPEN QUESTION (product gate, verbatim from the Goal): does a non-blocking proposal earn a
+room card at all? DIRECTION.md's human contract says an over-populated needs-you lane is itself
+a bug — the design must ration. Everything still open in this concern IS the gated surface: the
+two new kinds (report-raised, attention) are precisely the cards the question asks about, so
+there is no pre-gate slice left — concern 19 already shipped the daemon-side chokepoint
+(UnitAttentionLane), and concern 09's registry means the moment Lars rules, each new kind is
+one registry entry + one schema entry + one emit site through the lane. If the ruling is NO (ration harder), the alternative must be BUILT, not assumed: production has
+ZERO reads of agent.reports / agent.attentionEvents today (codex verified — UnitPanel does not
+render them; insights.ts records the old render path's deletion). Concern 17 named this gap;
+either ruling therefore requires a build: YES → the two room-card kinds; NO → a unit-drawer
+section + weekly-episode digest line. These P1 signals stay write-only until one of them ships.
 
 ## Provenance
 Round-2 review, webapp agent, rank 4, Worth exploring. Pre-named by concern 17's codex HIGH.

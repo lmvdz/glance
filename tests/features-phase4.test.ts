@@ -9,7 +9,7 @@ import { expect, test } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildFeatures } from "../src/features.ts";
-import type { AgentDTO, PersistedFeature } from "../src/types.ts";
+import type { AgentDTO, FeatureStage, PersistedFeature } from "../src/types.ts";
 
 const REPO = path.join(os.tmpdir(), "omp-squad-p4-" + Math.random().toString(36).slice(2));
 
@@ -42,7 +42,7 @@ test("buildFeatures: a Fabro feature takes its granular stage from the live work
 });
 
 test("buildFeatures: workflow nodes map to the right board lanes (the node overrides evidence)", async () => {
-	const cases: [string, string][] = [
+	const cases: [string, FeatureStage][] = [
 		["Research", "planned"], // a plain working agent would derive "in-progress" — the node forces "planned"
 		["Plan", "planned"],
 		["File to Plane", "issues-created"],

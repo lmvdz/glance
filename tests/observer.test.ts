@@ -555,7 +555,7 @@ test("an Observer constructed WITHOUT complianceFindings behaves exactly as befo
 	expect(filed).toEqual([]);
 });
 
-const noProof = () => false;
+const noProof = async () => false;
 
 test("survivor fingerprint is keyed on the stable Plane identifier, not the ephemeral agent id", async () => {
 	const issue = { id: "iss-1", name: "shipped", identifier: "OMPSQ-48" } satisfies IssueRef;
@@ -770,9 +770,9 @@ test("(proof-first, unit-level) auditLandedSurvivors/auditStaleDone never call a
 		aheadCalls++;
 		return 7; // would read as unlanded if ever consulted
 	};
-	const survivors = await auditLandedSurvivors([agent("a", "stopped", issue)], new Set<string>(), aheadOf, async () => {}, () => true);
+	const survivors = await auditLandedSurvivors([agent("a", "stopped", issue)], new Set<string>(), aheadOf, async () => {}, async () => true);
 	expect(survivors).toHaveLength(1);
-	const stale = await auditStaleDone([agent("a", "stopped", issue)], new Set<string>(), aheadOf, () => true);
+	const stale = await auditStaleDone([agent("a", "stopped", issue)], new Set<string>(), aheadOf, async () => true);
 	expect(stale).toHaveLength(0);
 	expect(aheadCalls).toBe(0); // proof consulted FIRST — the arithmetic never runs
 });

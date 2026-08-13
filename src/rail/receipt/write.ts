@@ -15,6 +15,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { LandResult } from "../../land.ts";
+import { errText } from "../../err-text.ts";
 import { gh } from "../../gh.ts";
 import type { LandReceiptGate } from "./types.ts";
 import type { LandReceipt, LandReceiptIndexRow } from "./types.ts";
@@ -206,7 +207,7 @@ export async function writeLandReceipt(stateDir: string, receipt: LandReceipt, o
 				// silently (grok #361): a persistent append failure (disk full, index-only perms) would
 				// otherwise under-report the gate's evidence with no signal at all.
 				try {
-					process.stderr.write(`writeLandReceipt: land-receipt index append failed (${e instanceof Error ? e.message : String(e)}) — HTML receipt written, dogfood count may under-report\n`);
+					process.stderr.write(`writeLandReceipt: land-receipt index append failed (${errText(e)}) — HTML receipt written, dogfood count may under-report\n`);
 				} catch {
 					/* stderr unavailable — nothing more we can safely do */
 				}

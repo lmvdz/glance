@@ -24,6 +24,155 @@ review phase when this queue runs dry; the codebase will have new hot spots by t
   projects. One green targeted run proves nothing (main flakes; see targeted-tests memory).
 - Blind grok + codex pass on every diff before it ships; adjudicate findings against the code.
 
+## Round 3 review (2026-08-12, iteration 16 — the goal's completion clause)
+Queue was dry (25 done, 2 needs-lars) → fresh review round executed: two Explore agents over
+the post-round-2 tree. Daemon: squad-manager re-measured at 13,570 lines/380 fields with a
+per-region coupling map — the voice surface named as the target shape (23 delegations/12
+fields over the 64-method coordinator); server.ts's 1,748-line handle() measured (99
+matchers). Webapp: the unreachable-surface CLASS found — nothing scans webapp/** exports and
+typechecked tests keep dead symbols green: VoiceCallHud (305 lines, 30-case suite, renders
+into nothing, took the idle-hangup warning down with it), the spawn-proposal hub trio (~226
+lines, doorless card whose copy claims wiring that doesn't exist), AdoptCard (complete
+vertical, no mount). Confirmed the 10-min-toast-vs-3-min-cap lie at VoiceCallContext:408.
+Refuted round-2's "VoiceCallSession class" framing (no state to own — consumer-table file
+split instead). Report: plans/deepen-modules/review-round-3.html (also published as an
+artifact). FOURTEEN candidates queued as concerns 28–41 (10 Strong, 4 Worth-exploring; 39+40
+carry named product gates). Below-cut recorded in the report: LandLane seam B (re-measure
+after 28), FeaturePlaneBridge, TranscriptStreamBuffer, channelTimeline window/paging move,
+shared card-emit primitive (waits on #381), grok CLI ops.
+
+## Round 3, iteration 15 (2026-08-12, goal mode — PR #381) — CONCERN 21 DONE — QUEUE RESOLVED
+UnitCardProjector: the manager's hand-rolled projection half becomes a module (363 lines behind
+an 8-closure port; manager sheds ~230). Grok's parity table: all 9 moved bodies byte-parity
+PASS. Codex's two Mediums both landed: the roomWorthy/gateClassOf collapse (two documented
+questions, one dep — the planned grace-period widening would have silently pinned needs-you
+cards to gate-only) and the incomplete structural slice (`options.task` crossed the port behind
+a cast). And the round's native row is the run-the-callers lesson yet again: the full root
+suite caught voice-ratchet's string scanner going blind on the moved needs-you copy — the
+targeted projection suites were all green. Every concern now shows done or needs-lars (13, 26):
+the queue is dry. Next: the round-3 architecture-review — the goal's completion clause.
+
+## Round 3, iteration 10 (2026-08-11, goal mode — docs) — CONCERN 26 → needs-lars
+The product gate is the whole remaining surface: report-raised/attention cards ARE the thing
+"does a non-blocking proposal earn a room card?" asks about, and both enabling seams already
+shipped (19's lane chokepoint, 09's one-entry registry). Disposition recorded with the question
+verbatim + the ration-harder alternative named. No pre-gate slice existed.
+
+## Round 3, iterations 10a+10b (2026-08-12 — PR #377) — 26 → needs-lars, 27 DONE (adjudicated)
+The dead-region inventory decayed under this round's own landings: 3 of 8 families ALIVE, the
+split half executed by #373/#375, and deleting conformance-gated mirrors hours after gating them
+would whipsaw. Executed the residue (4 dead api.ts client functions, one-sided by design — CLI
+still consumes the endpoints); the reader-less wire fields stay as documented mirrors, each
+future deletion a named omit-list decision. Full adjudication in the concern file.
+## Round 3, iteration 5 (2026-08-11, goal mode — PR #373) — CONCERN 24 SLICE 1
+DTO conformance 1→39 gated pairs; the wall was real: SquadEvent was missing audit/automation/
+voice-call-participant ENTIRELY (round-2 headline), ClientCommand missing six variants, IssueRef
+lacked the whole dispatch scope contract, + nine leaf drifts — all fixed type-only. Codex round
+went after the MACHINERY and won: variant checks were key-set-blind (H), skipReason concretely
+wrong in a mirror born this branch (M), optionality modifiers erased by value-indexing (M) — all
+three fixed, deliberate divergences now NAMED allowances (variant.field grain). Grok
+narration-only (gap row). Gates: check 0, root 5332/2-inherited, webapp 2002/0. Slice 2 open:
+AgentDTO (18 unmirrored + 11 mismatches through the workflow family, enumerated in the concern).
+
+## Round 3, iteration 9 (2026-08-11, goal mode — PR #373) — CONCERN 24 DONE (both slices)
+AgentDTO joins the gate: 18 mirrors (codex-verified exact), six optionality truths, four named
+allowances → then the codex round bit hard: a REAL drift hidden by an allowance (TodoStatus
+missing abandoned — undeclared render style) fixed so completely the allowance is deleted; the
+rest gained leaf pair gates (10 engine omissions named). 44 pairs gated total. Native row: cwd
+accident FOURTH strike (git rm + bun check both fooled from webapp/). Gates: check 0 both
+programs, root 5331/2-inherited+1-proven-flake, webapp 2002/0.
+## Round 3, iteration 8 (2026-08-11, goal mode — PR #376) — CONCERN 09 DONE
+Card-kind registry shipped: one webapp registration (tone+label+icon) per kind, recognition maps
+DERIVED (codex killed the second registration), fallbacks became explicit decisions — rendered
+output proven byte-equivalent (3,600 combos). Honest limits labeled: bespoke land/gate renderers
+own their live rendering. Codex M2 queued for the review round: projectionClasses/doorSurface
+quiet defaults are the same disease one layer deeper. Grok narration-only x4 this round — the
+CLI's headless reliability is itself becoming a finding. Gates all green.
+## Round 3, iteration 7 (2026-08-11, goal mode — PR #375) — CONCERN 08 DONE (slice 2)
+The wire-contract decision lands: kernel = type-only RE-EXPORTS of a now-truly-zero-import
+core-types (WorkLane flip shipped; types.ts honors its own barrel promise), domain DTOs =
+conformance-gated mirrors (24's file), payloads = runtime test. Codex proved the bundle graph
+carries zero daemon modules under the real vite config and every semantic widening has zero
+production reads; 2 doc Lows fixed. Grok narration-only x2. Gates: check 0, vite green, root
+5332/2-inherited, webapp 2002/0.
+## Round 3, iteration 12 (2026-08-12, goal mode — PR #379) — CONCERN 25 STEP 1
+The dead-component sweep (~1,300 lines) with the queue's best convergent round: both lineages
+independently named the same five feature orphans. Adjudicated three ways: 2 standing-status
+gaps FIXED here (retention-mismatch precedence + role=alert; browser-audio error/retry
+remounted), 3 pre-existing inert flows QUEUED with evidence (spawn-proposal doorless, adoption
+surfaceless, D3 lib halves test-only), 3 replaced + 2 safely-dead confirmed. Concern stays open
+for slices 2-3 (helper deletion + region lifts + consumer split).
+
+## Round 3, iteration 13 (2026-08-12, goal mode — PR #379) — CONCERN 25 DONE (step 3 → round 4)
+Slices 2a+2b: six hud helpers deleted, card regions re-homed byte-identically. THE ROUND'S BEST
+CATCH CHAIN: grok's dying narration flagged IDLE_HANGUP_MS, the root policy suite broke on it,
+codex reproduced it — a POLICY MIRROR wrongly swept as display code, restored; its sibling
+deleted as a default-mirror that would lie under overrides. Step 3 (consumer split + PaneStack
+parameterization + VoiceCallSession) carried to round 4 as a named candidate — the delivered
+value (~1,500 dead lines, 2 live fixes) stands alone.
+## Round 3, iteration 14 (2026-08-12, goal mode — PR #380) — CONCERN 22 DONE
+The CLI split, first slice EXECUTED BY A DELEGATED IMPLEMENTATION AGENT under the playbook and
+gated here: boot.ts hash-identical cmdUp, one api() over 14 drifted fetch sites, 1,630→382
+lines. Codex caught the unification breaking promote --json's 409 script contract (restored +
+3 regression pins added for the ~18 changed error paths). My own multiset verb check + codex
+both confirmed origin's duplicate dead case-open. Gates green.
+## Round 3, iteration 4 (2026-08-11, goal mode — PR #372) — CONCERN 23 DONE (both slices)
+Slice 2: the root corpus (449 test files) joins as check clause 4 — 301 errors paid to zero by
+FOUR PARALLEL fixers under a written playbook, then both lineages attacked the no-assertion-
+changes claim: codex audited all 48 changed expect-pairs (weak-assertion M on the rebuilt
+projection test — the headline contract is now actually proven with an unnamed control), grok
+caught the wire-unfaithful voice-fleet-action fixture. First recorded CROSS-LINEAGE
+DISAGREEMENT: grok passed the land-type widening, codex refuted it (fake never reaches tryLand;
+only adapter is boolean) — codex won on the code, ledgered. Root gate 5333 pass/2 fail (both
+main-inherited ratchets, fixed on #370); webapp 2002/0; 4-clause check green. 9 ledger rows.
+
+## Round 3, iteration 3 (2026-08-11, goal mode — PR #372) — CONCERN 23 SLICE 1 (webapp)
+The webapp test corpus joins the tsc program: webapp/tsconfig.tests.json = clause 3 of bun run
+check (codex verified: all 116 test files in the program, failure propagates, zero ts-nocheck).
+75 pre-existing errors across 24 files paid to zero without touching a single assertion — codex
+attacked exactly that claim and confirmed it, finding the two honest exceptions: partial voice
+bindings hidden by as-never (M — complete VoiceCallBindingDTO fixtures now) and
+SessionTypeSource requiring a name the impl deliberately tolerates missing (L — type widened to
+match the code). Native row: the cwd accident struck a THIRD time (foreground cd webapp leaked
+into a bg root-suite launch — caught by test-count sanity). Root corpus (~283 errors/119 files)
+is slice 2; concern stays open. (Iteration lines 1-2 live on their PR branches; keep-both-sides.)
+## Round 3, iteration 2 (2026-08-11, goal mode — PR #371) — CONCERN 18 DONE
+BoundarySyncLane extracted (round-2 rank 1): ~470 lines of turn-boundary wiring leave
+squad-manager for src/boundary-sync-lane.ts behind a 5-closure port + structural session slice;
+every fail-closed annotation moved verbatim. Codex: bodies normalized-identical, one Medium —
+the wiring suite's TestManager bracket-accessed the deleted privates, 20/22 tests TypeError'd
+at RUNTIME (concern 23's untyped-test blind spot, live again); seams migrated. Grok
+narration-only x3 (gap ledgered). Root 5332 pass; only reds are main-inherited ratchets
+(idiom 89/88 rail's unpaid hit, dead-exports 211/210 scanner position artifact) — both fixed
+on PR #370. (This branch is off main, so iteration 1's line lives on the #370 branch;
+keep-both-sides at merge.)
+## Round 3, iteration 6 (2026-08-11, goal mode — PR #374) — CONCERN 19 DONE
+UnitAttentionLane: eight hand-rolled append-then-emit raisers become one fail-open chokepoint;
+five escalation Map/Sets become two EscalationLedgers (tick-exact at the cap, both lineages
+verified). Codex M: the first cut minted randomUUID OUTSIDE the try — the fail-open had a hole
+exactly where once-flags were already armed; guard now covers construction. Grok 5/5 clean
+axes. Boundary-sync's REPLACE rows deliberately stay out (different semantics; documented).
+Concern 26's daemon chokepoint now exists. Gates: check 0, root 5340/2-inherited, webapp 2002/0.
+## Round 3, iteration 11 (2026-08-12, goal mode — PR #378) — CONCERN 20 DONE
+Store: 36-member bag → five lane interfaces + intersection; consumers narrowed to quarters;
+26 inline NodeRecordStore constructions (16 silently unlogged) → one field, one logger. BOTH
+lineages fully delivered, both clean (independent 36/36 parity proofs; statelessness proven).
+Debt recorded: NodeStore's legacy-migration load() edge. Gates green.
+## Round 3, iteration 1 (2026-08-11, goal mode — PR #370) — CONCERN 14 RECOVERED FROM ORPHAN
+Also in the PR: the fresh cross-lineage round on the recovery diff (11 ledger rows, 7 survived —
+generation-billing race double-convergent, cleared-issues-never-redispatch, strict control ledger,
+corrupt-ledger false all-clear) and the dead-exports scanner repair (raw token scan was lexer-blind
+after template interpolations/regexes; now a real parse — BASELINE 210→225 honest re-measure, 15
+revealed paydown candidates named in scripts/dead-exports.ts). Main's own unpaid error-idiom hit
+(rail 2f9a715c, main RED at 89/88) paid here too.
+Restarting the loop on fresh main surfaced that PR #313 (concern 14, difficulty-targeted
+dispatch) had merged into a dead base branch (`deepen/05-route-table`) — MERGED on GitHub, never
+on main. All other train PRs (312, 314–320, 322) based main correctly; the orphan was exactly
+concern 14's 9 commits. Recovery: merge origin/deepen/14-difficulty-dispatch onto fresh main
+(deepen/14-recovery), one docs conflict (17 add/add, kept main's resolved side), full gates +
+fresh blind grok/codex round targeted at integration-with-moved-main (rail campaign landed since
+the branch died). Detection recipe in the concern file and the stacked-pr-wrong-base memory.
+
 ## Round 2 (2026-08-04, iteration 37 — the goal's completion clause)
 Queue was dry (14 done, 3 needs-lars) → fresh review round executed: two Explore agents over
 current main (daemon: squad-manager regions with per-region coupling counts, Store, CLI,
@@ -191,6 +340,45 @@ here. Rule: docs via the Edit tool or a `&&`-chained script, never a bare heredo
 ## Iteration 9 (2026-08-04, goal mode)
 05 slice 1 shipped: the route-table seam exists and is real (two lane adapters). Suite 4947/1
 (dead-exports pre-existing only — best state yet). PR: deepen/05-route-table branch.
+
+## Iteration 14 (2026-08-04, goal mode)
+14 slice 3b partial: evidence surface + clear verb built; apply RETREATED to shadow a second
+time on codex's round-2 five (render gap, repo scoping, clear generation, audit depth, manager
+binding) — now the 3b-final checklist. Codex 31/31 on the ledger. The pattern is now structural:
+every "turn the gate on" attempt has been stopped by a blind pass finding the honesty gap the
+implementation missed. That is the verification bet working exactly as CS329A says it should.
+
+## Iteration 21 (2026-08-04, goal mode) — CONCERN 14 DONE
+The starvation gate went real: rendered control on MondaySurface, audited generation-reset
+clears, org binding by construction. The CS329A borrow that read simplest in the brief took
+FOUR review rounds and TWO deliberate retreats — the deepest verification story in the queue.
+Bonus discoveries filed: concern 17 (the attention-items pipeline is unrendered) and the
+cwd-accident process rule. Eight concerns done.
+
+## Iteration 20 (2026-08-04, goal mode)
+14 3b-final items 2-4: generations, repo scoping, atomic audited clears. Codex round-3 caught
+the unaudited-clear hole + counter contradictions + legacy invisibility — three rounds deep and
+the reviewer still earns every pass. Items 1 (rendered control) + 5 (org binding) remain.
+
+## Iteration 13 (2026-08-04, goal mode)
+14 slice 3a: the evidence half per DESIGN v2, shadow-only. Four codex findings survived+fixed
+(runId race, A-B-A dedup, map growth, O(N×M) reads); my own test caught the snapshot cache's
+read-after-write hazard before review did. Suite 4961/1 (pre-existing only). Codex 26/26 on the
+ledger; one codex finding lost to output truncation twice — recorded as a gap, not fabricated.
+
+## Iteration 12 (2026-08-04, goal mode)
+14 slice 2: the gating DESIGN, two rounds. v1 answered the implementation-review findings; the
+design red-team then found eight holes in v1 (tick-global seam, typo re-arm, unaudited clear,
+race identity split, crash-lossable announcement, double-count) — all folded into DESIGN v2.
+Codex 22/22 on the ledger. Docs-only slice. Lesson: designs need the same two-round adversarial
+treatment as diffs — the first honest design is still wrong at the seams.
+
+## Iteration 10 (2026-08-04, goal mode)
+14 slice 1: difficulty instrumentation shipped SHADOW-ONLY — the review earned its keep at design
+level (three High findings survived; gating refused until the redesign answers 14's open
+questions). Codex crossed the reviewer-ledger's n=10 floor this iteration: 17/17, no longer
+provisional. Lesson: a borrow that reads simple in the brief can be wrong at the seams — the
+blind pass on the WIRING is where that shows.
 
 ## Queue pivot (2026-08-03, Lars)
 

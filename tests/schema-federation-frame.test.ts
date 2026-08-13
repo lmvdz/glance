@@ -22,12 +22,12 @@ test("accepts a presence frame and preserves opaque agent DTOs untouched", () =>
 		agents: [{ id: "a1", name: "coder", nested: { deep: [1, 2] }, cost: 3.2 }],
 		updatedAt: 1000,
 	};
-	expect(ok({ kind: "presence", presence })).toEqual({ kind: "presence", presence });
+	expect(ok({ kind: "presence", presence })).toEqual({ kind: "presence", presence } as never);
 });
 
 test("accepts a command frame with a valid embedded ClientCommand", () => {
 	const frame = { kind: "command", cmd: { type: "prompt", id: "a", message: "hi" }, actor, ip: "100.64.0.1", to: "me", cmdId: "c1" };
-	expect(ok(frame)).toEqual(frame);
+	expect(ok(frame)).toEqual(frame as never);
 });
 
 test("drops a command frame whose embedded command is malformed", () => {
@@ -50,7 +50,7 @@ test("validates actor shape and strips injected keys", () => {
 	expect(rejected({ kind: "message", from: { origin: "remote" }, text: "t", ts: 1 })).toBe(true); // no id
 	// An injected key on the actor is stripped, not preserved.
 	const decoded = ok({ kind: "message", from: { id: "x", origin: "remote", role: "admin", evil: 1 }, text: "t", ts: 1 });
-	expect((decoded as { from: Record<string, unknown> }).from.evil).toBeUndefined();
+	expect((decoded as unknown as { from: Record<string, unknown> }).from.evil).toBeUndefined();
 });
 
 test("rejects unknown / missing kind and non-objects", () => {

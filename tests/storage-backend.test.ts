@@ -82,7 +82,10 @@ test("proof persistence routes through the active backend (runProof write, proof
 });
 
 test("ArchilStorageBackend loud-fails until provisioned; backendFromEnv selects it", async () => {
-	const archil = new ArchilStorageBackend();
+	// Typed as the INTERFACE (codex, concern 23 round): the concrete stub declares 0-arg loud-fail
+	// methods, but real callers pass path/data — the test must prove the fail-closed behavior on
+	// the same call shape production uses, not on a zero-arg shape only the stub knows.
+	const archil: StorageBackend = new ArchilStorageBackend();
 	expect(archil.name).toBe("archil");
 	await expect(archil.writeDurable("/x", "y")).rejects.toThrow(/not provisioned/i);
 	expect(() => archil.exists("/x")).toThrow(/not provisioned/i);

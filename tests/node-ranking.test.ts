@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -24,7 +24,7 @@ function agent(id: string, lastActivity: number, createdAt: number): AgentDTO {
 		createdAt,
 		lastActivity,
 		messageCount: 12,
-	} as AgentDTO;
+	} as unknown as AgentDTO;
 }
 
 describe("node activity ranking", () => {

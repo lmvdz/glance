@@ -5,7 +5,7 @@
  * tested elsewhere in this file's siblings — no HTTP mocking in this codebase's CLI tests.
  */
 import { describe, expect, test } from "bun:test";
-import { renderSearchResults } from "../src/index.ts";
+import { renderSearchResults } from "../src/cli/render.ts";
 import type { FabricSearchResult } from "../src/memory/fabric-search.ts";
 
 function hit(overrides: Partial<FabricSearchResult> = {}): FabricSearchResult {

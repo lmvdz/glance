@@ -114,7 +114,7 @@ test("the manager answers the cost AND whether it should be shown", async () => 
 	await mgr.start();
 
 	const store = new FileStore(stateDir);
-	await store.putNode({ id: "n1", kind: "unit", title: "u", state: "working", createdAt: 1, channelId: null });
+	await store.putNode({ id: "n1", kind: "unit", title: "u", state: "working", createdAt: 1, channelId: undefined });
 	await new NodeRecordStore(store).put({ kind: "evidence", id: "c1", nodeId: "n1", createdAt: 1, claim: "cost:120", verification: "checked", sampleSize: 1, sourceNodeIds: [] });
 
 	const quiet = await mgr.costSummary("n1");
@@ -150,7 +150,7 @@ test("a rule reaches the point it acts with its author attached", async () => {
 	await mgr.start();
 
 	const store = new FileStore(stateDir);
-	await store.putNode({ id: "n1", kind: "unit", title: "u", state: "working", createdAt: 1, channelId: null });
+	await store.putNode({ id: "n1", kind: "unit", title: "u", state: "working", createdAt: 1, channelId: undefined });
 	const records = new NodeRecordStore(store);
 	await records.put({ kind: "decision", id: "d1", nodeId: "n1", createdAt: 1, question: "q", options: [], chose: "yes", decidedBy: "db:lars", askedAt: 1, decidedAt: 2, reason: "no-rule-applied" });
 	await records.put({

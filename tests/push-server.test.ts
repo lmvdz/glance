@@ -76,7 +76,7 @@ class NoopDriver extends EventEmitter implements AgentDriver {
 		return undefined;
 	}
 	async getState(): Promise<RpcSessionState> {
-		return { todoPhases: [], isStreaming: false } as RpcSessionState;
+		return { todoPhases: [], isStreaming: false } as unknown as RpcSessionState;
 	}
 	respondUi(): void {}
 	respondHostTool(): void {}
@@ -236,7 +236,7 @@ test("needs-you room card and status lane produce exactly one push for one pendi
 		notify: async (payload: PushPayload) => {
 			calls.push(payload);
 		},
-	} as PushService;
+	} as unknown as PushService;
 
 	const { mgr, rec, dirs } = await liveAgent("pushneeds");
 	const server = new SquadServer(mgr, { port: 0, push });
@@ -497,7 +497,7 @@ test("duration gate (daily-attention-w0 01 + finding #4): a short casual turn do
 	await mgr.start();
 	(mgr as unknown as DriverFactoryHost).makeDriver = () => new NoopDriver();
 	const dto = await mgr.create({ name: "chat", repo, approvalMode: "yolo", autoRoute: false, appendSystemPrompt: CONSOLE_SYSTEM_PROMPT });
-	const rec = (mgr as unknown as { agents: Map<string, { options: PersistedAgent; agent: AgentDriver }> }).agents.get(dto.id);
+	const rec = (mgr as unknown as InternalHost).agents.get(dto.id);
 	if (!rec) throw new Error("agent not resident");
 
 	const server = new SquadServer(mgr, { port: 0, push });

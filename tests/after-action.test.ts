@@ -16,6 +16,7 @@ function input(over: Partial<AfterActionInput> = {}): AfterActionInput {
 		issueUrl: "https://plane.example/OMPSQ-447",
 		goal: "DoneProof records are never re-validated",
 		terminalReason: 'node "escalate" exceeded its visit cap (2)',
+		channelId: null,
 		terminalAt: NOW - 3 * 86_400_000,
 		trajectory: ["Implement", "Verify", "Fixup", "Verify", "Escalate", "Verify"],
 		visits: { implement: 1, verify: 7, fixup: 3, escalate: 2 },

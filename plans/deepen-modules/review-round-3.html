@@ -1,0 +1,137 @@
+<title>glance · architecture review, round 3</title>
+<style>
+  :root {
+    --bg: #faf8f5; --ink: #26221d; --ink-soft: #6b6257; --line: #e5dfd6;
+    --card: #ffffff; --accent: #c25419; --accent-soft: #f6e8de;
+    --strong: #1e6b46; --strong-bg: #e4f1e9; --explore: #8a6410; --explore-bg: #f5ecd4;
+    --skip: #6b6257; --skip-bg: #edeae4; --code-bg: #f1ede6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #1c1917; --ink: #e8e2d9; --ink-soft: #a39a8d; --line: #37322c;
+      --card: #241f1c; --accent: #e06a33; --accent-soft: #3a2a1e;
+      --strong: #6fc396; --strong-bg: #1e2f26; --explore: #d9b45c; --explore-bg: #322b19;
+      --skip: #a39a8d; --skip-bg: #2b2723; --code-bg: #2b2723;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #1c1917; --ink: #e8e2d9; --ink-soft: #a39a8d; --line: #37322c;
+    --card: #241f1c; --accent: #e06a33; --accent-soft: #3a2a1e;
+    --strong: #6fc396; --strong-bg: #1e2f26; --explore: #d9b45c; --explore-bg: #322b19;
+    --skip: #a39a8d; --skip-bg: #2b2723; --code-bg: #2b2723;
+  }
+  :root[data-theme="light"] {
+    --bg: #faf8f5; --ink: #26221d; --ink-soft: #6b6257; --line: #e5dfd6;
+    --card: #ffffff; --accent: #c25419; --accent-soft: #f6e8de;
+    --strong: #1e6b46; --strong-bg: #e4f1e9; --explore: #8a6410; --explore-bg: #f5ecd4;
+    --skip: #6b6257; --skip-bg: #edeae4; --code-bg: #f1ede6;
+  }
+  body { background: var(--bg); color: var(--ink); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+         margin: 0; padding: 3rem 1.25rem 5rem; }
+  main { max-width: 76ch; margin: 0 auto; }
+  header.masthead { border-bottom: 3px solid var(--accent); padding-bottom: 1.2rem; margin-bottom: 2rem; }
+  .eyebrow { text-transform: uppercase; letter-spacing: .14em; font-size: .72rem; color: var(--accent); font-weight: 700; }
+  h1 { font-size: 1.9rem; line-height: 1.2; margin: .3rem 0 .5rem; text-wrap: balance; }
+  .prov { color: var(--ink-soft); font-size: .88rem; }
+  h2 { font-size: 1.25rem; margin: 2.6rem 0 .8rem; border-bottom: 1px solid var(--line); padding-bottom: .35rem; }
+  h3 { font-size: 1.02rem; margin: 1.6rem 0 .4rem; }
+  p { margin: .6rem 0; }
+  .chip { display: inline-block; font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em;
+          padding: .18em .6em; border-radius: 2px; vertical-align: middle; }
+  .chip.strong { color: var(--strong); background: var(--strong-bg); }
+  .chip.explore { color: var(--explore); background: var(--explore-bg); }
+  .chip.skip { color: var(--skip); background: var(--skip-bg); }
+  code { background: var(--code-bg); padding: .1em .35em; border-radius: 3px; font-size: .85em; }
+  table { border-collapse: collapse; width: 100%; font-size: .88rem; margin: 1rem 0; font-variant-numeric: tabular-nums; }
+  .tablewrap { overflow-x: auto; }
+  th, td { text-align: left; padding: .4rem .7rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-soft); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 1rem 1.2rem; margin: 1rem 0; }
+  .card h3 { margin-top: 0; }
+  .meta { color: var(--ink-soft); font-size: .82rem; }
+  ul { padding-left: 1.3rem; }
+  li { margin: .35rem 0; }
+</style>
+<main>
+<header class="masthead">
+  <div class="eyebrow">plans/deepen-modules · round 3</div>
+  <h1>Architecture review, round 3</h1>
+  <p class="prov">2026-08-12 · two Explore agents over the post-round-2 tree (daemon + webapp) · queued as concerns 28–41 on <code>deepen/round-3-docs</code> · scouts measured branch <code>deepen/round-3-docs</code> (= origin/main + queue docs; PRs #370–#381 not yet merged, so their extractions are counted as still-inline where relevant)</p>
+</header>
+
+<h2>What this round is</h2>
+<p>Rounds 1–2 queued 27 concerns; all now show <strong>done</strong> or <strong>needs-lars</strong> (13, 26). Eleven draft PRs (#370–#381) await merge. This round re-scouted the tree with the same deep-module lens — small interfaces hiding real complexity, shallow seams, quiet defaults, information leakage — plus the candidates carried out of rounds 1–2's review ledgers. Two findings classes dominate: <strong>the daemon's remaining god-regions now have measured seams</strong> (the voice surface proves the target shape: 23 manager methods touching 12 fields over a 64-method coordinator), and <strong>the webapp has a class of green-but-unreachable surfaces</strong> that no gate can see because nothing scans <code>webapp/</code> exports and tests keep dead symbols compiling.</p>
+
+<h2>Headline findings</h2>
+<div class="card">
+  <h3>A 305-line component and its 30-case suite render into nothing</h3>
+  <p><code>webapp/src/components/hub/VoiceCallHud.tsx</code> has zero production importers — its controls moved to <code>Composer.tsx</code>'s icon row and the component was never deleted. The cascade is the real finding: the idle-hangup <em>warning</em> (<code>idlePolicyLine</code>, three copies including a live countdown) renders only inside this dead component, so the shipped 10-minute idle policy is <strong>invisible on screen</strong> while <code>VoiceWorkspace.test.tsx</code> keeps asserting the copy against a component nothing mounts. A green suite is pinning a surface that does not exist. → concerns 36, 35.</p>
+</div>
+<div class="card">
+  <h3>The idle toast tells a 3× lie</h3>
+  <p><code>VoiceCallContext.tsx:407-409</code> fires <code>shouldEndCallForIdle</code> at <strong>3 minutes</strong> (<code>CALL_IDLE_TIMEOUT_MS</code>, "Tightened 10min → 3min, Lars 2026-07-15") and then toasts <em>"ended automatically after 10 minutes of inactivity."</em> The tightening changed the constant and left the only string that reports it. Root cause is structural: two voice lanes (PTT vs room) mirror each other's policy with no shared boundary, so no string owns the number it names. → concern 36.</p>
+</div>
+<div class="card">
+  <h3>The projection-class table claims to be policy while four kinds route around it</h3>
+  <p><code>projection-classes.ts</code> lists 11 of 19 transcript-event kinds and falls back quiet-to-node — defensible. But the three voice kinds and <code>token-burn-snapshot</code> are emitted into the room by bespoke sites that never consult the table: the table is not wrong, it is <em>bypassed</em>. And <code>doorSurface</code>'s <code>default: "unit"</code> is worse than the projection default — the webapp only synthesizes hrefs for <code>plan</code>/<code>intervence</code>, so a wrong default is a silently doorless card. → concern 32.</p>
+</div>
+
+<h2>Queued concerns</h2>
+<div class="tablewrap"><table>
+  <tr><th>#</th><th>Concern</th><th>Verdict</th><th>Anchor numbers</th></tr>
+  <tr><td>28</td><td>WorkScopeProbe — land lane seam A</td><td><span class="chip strong">strong</span></td><td>squad-manager 5572–5810, 12 methods, near-pure git probing</td></tr>
+  <tr><td>29</td><td>PrReconcileLane</td><td><span class="chip strong">strong</span></td><td>9667–10150, 13 methods, only 21 fields — best size:coupling ratio</td></tr>
+  <tr><td>30</td><td>server.ts route table</td><td><span class="chip strong">strong</span></td><td>handle() = 1,748 lines, 99 exact + 4 prefix matchers; handleObservability proves the seam</td></tr>
+  <tr><td>31</td><td>applyCommand → CommandRouter</td><td><span class="chip strong">strong</span></td><td>8183–8487: 9 if-branches + 190-line switch, schema already knows every shape</td></tr>
+  <tr><td>32</td><td>Projection door totality + table honesty</td><td><span class="chip strong">strong</span></td><td>8/19 kinds unlisted, 4 bypass the table, doorSurface defaults doorless</td></tr>
+  <tr><td>33</td><td>NodeStore startup migration</td><td><span class="chip strong">strong</span></td><td>every read awaits migration; 2 instances = 2 memos = concurrent double-run</td></tr>
+  <tr><td>34</td><td>SocketData + face-shape contracts</td><td><span class="chip strong">strong</span></td><td>unexported type imported by tests; 2 unrelated SocketData; PointerCardFace hand-mirrors the schema</td></tr>
+  <tr><td>35</td><td>Dead-exports scanner: webapp arm</td><td><span class="chip strong">strong</span></td><td>scanner covers src/** only; would have caught VoiceCallHud + spawn trio</td></tr>
+  <tr><td>36</td><td>CallPolicy — one owner per number</td><td><span class="chip strong">strong</span></td><td>10-vs-3 toast lie; callHud.ts = 3 unrelated modules; idle warning invisible</td></tr>
+  <tr><td>37</td><td>HubShell pane registry</td><td><span class="chip strong">strong</span></td><td>873 lines, 78 hooks; 5-branch ternary, 34 props, 7 touch points per new pane</td></tr>
+  <tr><td>38</td><td>roomCall.ts consumer-table split</td><td><span class="chip explore">explore</span></td><td>1,064 lines, 63 exports, 13 importers in disjoint slices — NOT a class (no state to own)</td></tr>
+  <tr><td>39</td><td>Spawn-proposal room path: wire or delete</td><td><span class="chip explore">explore</span></td><td>doorless card, unreachable door label, ~226 lines of UI + detection half nothing calls</td></tr>
+  <tr><td>40</td><td>Adoption: finish or delete</td><td><span class="chip explore">explore</span></td><td>route+schema+bridge+component all live, zero mount points — one missing line</td></tr>
+  <tr><td>41</td><td>SpawnPlan — createWithId's pure first half</td><td><span class="chip explore">explore</span></td><td>776-line method, 43 fields; staged carve, not a whole-region move</td></tr>
+</table></div>
+
+<h2>Daemon: the region map, re-measured</h2>
+<p><code>src/squad-manager.ts</code> at 13,570 lines, 435 members, 380 distinct <code>this.</code> symbols (measured pre-merge of #370–#381; concern 21's projector subtracts ~455 more once #381 lands). The remaining islands, by tangle:</p>
+<div class="tablewrap"><table>
+  <tr><th>Region</th><th>Span</th><th>Methods</th><th>this. fields</th><th>Verdict</th></tr>
+  <tr><td>Land / merge lane</td><td>4319–5810 (~1,490)</td><td>44</td><td>62</td><td>split: probe first (28), lane later</td></tr>
+  <tr><td>Spawn / create / lifecycle</td><td>6783–7910</td><td>14</td><td>55</td><td>staged carve (41)</td></tr>
+  <tr><td>Wire + onAgentEvent</td><td>9022–9666</td><td>11</td><td>44</td><td>leave — this IS the reduce step</td></tr>
+  <tr><td>applyCommand + delivery</td><td>8183–8600</td><td>9</td><td>40</td><td>CommandRouter (31)</td></tr>
+  <tr><td>PR reconcile</td><td>9667–10150</td><td>13</td><td>21</td><td>extract (29)</td></tr>
+  <tr><td>Projection</td><td>12726–13180</td><td>18</td><td>28</td><td>done on PR #381</td></tr>
+  <tr><td>Voice pass-through</td><td>12426–12730</td><td>23</td><td>12</td><td><strong>already deep — the target shape</strong></td></tr>
+</table></div>
+<p>The voice surface is the counter-example worth naming: <code>VoiceCallCoordinator</code> (1,058 lines, 64 methods, 43 fields) hides everything behind 23 manager one-liners touching 12 fields. Every extraction this round should be re-measured against that: did the manager-side remainder collapse to delegations with a single-digit field count?</p>
+
+<h2>Webapp: the unreachable-surface class</h2>
+<p>Nothing scans <code>webapp/**</code> exports (<code>scripts/dead-exports.ts</code> declares its candidate universe as <code>src/**</code> only), and since the test-typecheck gate landed, a test-only import keeps any symbol compiling and green forever. The sweep's inventory of surfaces pinned by tests but reachable by no user: <code>VoiceCallHudView</code> + <code>callIsIdleCritical</code> (24 + 2 render sites in tests), <code>SpawnConfirmSheet</code>/<code>SpawnStatusCard</code>/<code>SpawnProposalCard</code> hub trio, <code>spawnProposalFor</code> detection half (7 cases), the idle-copy assertions, and <code>AdoptCard</code>. One scanner arm (35) turns this whole class from invisible to ratcheted.</p>
+
+<h2>Refuted / corrected premises</h2>
+<ul>
+  <li><strong>"VoiceCallSession class extraction"</strong> — refuted. <code>roomCall.ts</code> holds no session state machine; every export is a pure <code>(DTO, now) → copy/model</code> function. The stateful session lives in <code>VoiceCallContext.tsx</code> (44 hooks) and <code>useRoomCall.ts</code>. The honest seam is a file split along the existing banner sections, driven by the 13-importer consumer table (38).</li>
+  <li><strong>"IDLE_WARNING_MS was deleted as dead"</strong> — wrong; it lives (<code>roomCall.ts:279</code>) and its countdown copy ships — into the dead HUD. The gap is real but the mechanism is item 36's, not a missing constant.</li>
+  <li><strong>"idle countdown never built"</strong> — it was built, orphaned, and is still tested. Worse than never-built.</li>
+  <li><strong>Two spawn proposals share a name</strong> — the <em>chat</em> proposal (<code>SpawnProposalCard</code> with a working door) and the <em>hub</em> card (<code>local:spawn-proposal</code>, doorless, whose detail copy claims a wiring that does not exist). Only the hub path is dead (39).</li>
+</ul>
+
+<h2>Below the cut</h2>
+<ul>
+  <li><strong>LandLane (seam B)</strong> — extract WorkScopeProbe first; the 62-field count is mostly the probe living inside the lane. Re-measure after 28.</li>
+  <li><strong>FeaturePlaneBridge</strong> (squad-manager 3504–3615) — clean lift, medium value; next round.</li>
+  <li><strong>TranscriptStreamBuffer</strong> (9562–9666, four stream mutators) — small win attached to a leave-alone region.</li>
+  <li><strong>channelTimeline window/paging exports</strong> (<code>reduceChannelEntryWindow</code>, <code>latestChannelSeq</code>) belong beside <code>RoomSessionCursor</code>; 2-export move, fold into any timeline-touching concern.</li>
+  <li><strong>Shared card-emit primitive under both projectors</strong> — concern 21's named follow-up; wait until #381 and the voice coordinator's emit path can be compared side by side.</li>
+  <li><strong>grok CLI headless reliability</strong> — 7 narration-only flakes this round (ops, not architecture; ledgered).</li>
+</ul>
+
+<h2>Cleared as already-deep</h2>
+<p>Voice pass-through + <code>VoiceCallCoordinator</code>; the wire/onAgentEvent reduce step (44 fields is honest); <code>channelTimeline.ts</code>'s dispatch core (<code>dispatchChannelCard</code> → <code>buildChannelThreadViews</code> → <code>faceFromPayload</code>); the pane-stack <em>model</em> (74 pure tested lines — it's the render ladder that's shallow); <code>lib/roomSession.ts</code>.</p>
+
+<p class="meta">Method: two read-only Explore agents (daemon: 46 tool calls; webapp: 37), each verifying the carried candidate inventory from rounds 1–2 against the live tree and reporting anchors + coupling counts; findings merged with the reviewer-ledger carry-list by the orchestrating session. Scout reports archived in the session transcript. Concerns 28–41 queued as files in this directory.</p>
+</main>

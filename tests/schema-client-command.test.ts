@@ -115,11 +115,11 @@ test("create: internal restore/fan-out fields are kept as opaque passthrough (no
 		traceId: "t",
 	};
 	// optional(Unknown) preserves the value verbatim rather than dropping the key.
-	expect(ok({ type: "create", options })).toEqual({ type: "create", options });
+	expect(ok({ type: "create", options })).toEqual({ type: "create", options } as never);
 });
 
 test("create: strips keys that are not part of CreateAgentOptions (field-injection defense)", () => {
-	const decoded = ok({ type: "create", options: { repo: "/r", role: "admin", orgId: "other" } }) as { options: Record<string, unknown> };
+	const decoded = ok({ type: "create", options: { repo: "/r", role: "admin", orgId: "other" } }) as unknown as { options: Record<string, unknown> };
 	expect(decoded.options).toEqual({ repo: "/r" });
 	expect("role" in decoded.options).toBe(false);
 });

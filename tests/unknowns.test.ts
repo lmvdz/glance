@@ -23,7 +23,7 @@ test("cold start makes six borrowed defaults visible and individually reversible
 	expect(state.borrowedDefaults.every((rule) => rule.status === "borrowed" && rule.reversal.length > 0)).toBe(true);
 	expect(state.outOfHoursContact).toBe("unset");
 	expect(state.outOfHoursSentence).toBeUndefined();
-	expect(borrowedDefaults.map((rule) => rule.id)).toEqual(state.borrowedDefaults.map((rule) => rule.id));
+	expect(borrowedDefaults.map((rule) => rule.id)).toEqual(state.borrowedDefaults.map((rule) => rule.id) as never);
 });
 
 test("every unknown names the evidence, sample, and cost required to settle it", () => {

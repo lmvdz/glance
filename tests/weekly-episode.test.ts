@@ -378,7 +378,7 @@ test("EpisodeLoop.tick: unchanged fingerprint skips (ring-only); drift regenerat
 	const after = await readEpisode(dir, "/repo", prev);
 	expect(after?.builtHash).not.toBe(before?.builtHash);
 	const prevGen = await fs.readFile(path.join(dir, "episodes", episodeRepoHash("/repo"), `${prev}.prev.md`), "utf8");
-	expect(prevGen).toBe(before?.markdown);
+	expect(prevGen).toBe(before?.markdown!);
 
 	// Hand-edit: content no longer matches builtHash → quarantined, never regenerated over.
 	const mdPath = path.join(dir, "episodes", episodeRepoHash("/repo"), `${prev}.md`);

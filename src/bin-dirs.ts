@@ -16,7 +16,7 @@
  * PATH entry (this cannot and does not try to enumerate every possible install location).
  *
  * WHERE this is applied, and deliberately NOT applied: `applyWellKnownDirsToProcessPath` (below) is
- * called exactly ONCE, at the real daemon's actual boot (`index.ts`'s `cmdUp`, before anything spawns)
+ * called exactly ONCE, at the real daemon's actual boot (`boot.ts`'s `cmdUp`, before anything spawns)
  * — widening `process.env.PATH` in place so every later spawn (`spawn-env.ts`'s `scrubbedSpawnEnv`,
  * `harness-registry.ts`'s `binResolvable`) inherits the widened value for free, with zero code changes
  * at those call sites. It is deliberately NOT wired into `scrubbedSpawnEnv` itself: that function is

@@ -20,19 +20,24 @@ const { SubagentTracker } = await import("../src/subagents.ts");
 
 /** Exposes the protected/private seams the `agent_start`/`agent_end` frame cases call. */
 class TestManager extends SquadManager {
+	/** The extracted lane (concern 18) — the frame loop calls it directly; tests reach the same
+	 *  seams through the manager's private `boundaryLane` field, bracket-access discipline as before. */
+	private get lane(): { turnStart(rec: never): void; turnEnd(rec: never): void; reattachAtBoot(): Promise<void>; chains: Map<string, Promise<void>>; held: { listHeld(id: string): Promise<{ turn: number; reason: string }[]>; hold(e: unknown): Promise<unknown> }; target(rec: never): string; queue(rec: never, realDir: string, fn: () => Promise<void>): Promise<void> } {
+		return this["boundaryLane"] as never;
+	}
 	turnStart(id: string): void {
-		// bracket access: the frame loop calls this private seam; tests reach it the same way answers.test.ts does
-		this["boundaryTurnStart"](this.agents.get(id) as never);
+		// the frame loop calls this lane seam; tests reach it the same way answers.test.ts does
+		this.lane.turnStart(this.agents.get(id) as never);
 	}
 	turnEnd(id: string): void {
-		// bracket access: the frame loop calls this private seam; tests reach it the same way answers.test.ts does
-		this["boundaryTurnEnd"](this.agents.get(id) as never);
+		// the frame loop calls this lane seam; tests reach it the same way answers.test.ts does
+		this.lane.turnEnd(this.agents.get(id) as never);
 	}
 	/** Settle every serialized boundary-sync chain (what the daemon awaits implicitly). Chains are
-	 *  keyed by real directory on the MANAGER (not per record) since the realDir-serialization fix,
+	 *  keyed by real directory on the LANE (not per record) since the realDir-serialization fix,
 	 *  so draining them all is the test-side equivalent of the old per-agent await. */
 	async settle(_id?: string): Promise<void> {
-		const chains = this["boundarySyncChains"] as Map<string, Promise<void>>;
+		const chains = this.lane["chains" as never] as unknown as Map<string, Promise<void>>;
 		await Promise.all([...chains.values()]);
 	}
 	rec(id: string): { dto: AgentDTO; boundarySyncTurn?: number; boundarySyncEndTree?: string } {
@@ -42,16 +47,16 @@ class TestManager extends SquadManager {
 	 *  capture/sync/apply/discard rides). */
 	enqueue(id: string, fn: () => Promise<void>): Promise<void> {
 		const rec = this.agents.get(id) as never;
-		const realDir = this["boundarySyncTarget"](rec) as string;
-		return this["queueBoundarySync"](rec, realDir, fn);
+		const realDir = (this.lane["target" as never] as unknown as (rec: unknown) => string)(rec);
+		return (this.lane["queue" as never] as unknown as (rec: unknown, realDir: string, fn: () => Promise<void>) => Promise<void>)(rec, realDir, fn);
 	}
 	reattach(): Promise<void> {
-		// bracket access: the frame loop calls this private seam; tests reach it the same way answers.test.ts does
-		return this["reattachHeldSyncs"]();
+		// the frame loop calls this lane seam; tests reach it the same way answers.test.ts does
+		return this.lane.reattachAtBoot();
 	}
 	/** Direct read of the durable held-patch store — bracket access, same seam discipline as above. */
 	heldFor(id: string): Promise<{ turn: number; reason: string }[]> {
-		return (this["boundarySyncHeld"] as { listHeld(id: string): Promise<{ turn: number; reason: string }[]> }).listHeld(id);
+		return this.lane["held" as never] ? (this.lane["held" as never] as unknown as { listHeld(id: string): Promise<{ turn: number; reason: string }[]> }).listHeld(id) : Promise.resolve([]);
 	}
 }
 
@@ -632,7 +637,7 @@ test("M1: a fast next-turn-start racing a still-queued end-sync closure must not
 	// Pre-seed a backlog entry so ANY turn holds unconditionally (step 2, ordering) regardless of the
 	// real tree's fingerprint — removes fingerprint timing from the picture entirely; only the turn
 	// NUMBER stamped on the resulting hold is under test here.
-	await (mgr as unknown as { boundarySyncHeld: { hold(e: unknown): Promise<unknown> } }).boundarySyncHeld.hold({
+	await ((mgr as unknown as { boundaryLane: { held: { hold(e: unknown): Promise<unknown> } } }).boundaryLane.held).hold({
 		agentId: "chat-1",
 		turn: 0,
 		realDir: repo,

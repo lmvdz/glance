@@ -36,6 +36,7 @@ function agent(over: Partial<AgentDTO> = {}): AgentDTO {
 		id: "a",
 		name: "a",
 		status: "idle",
+		kind: "omp-operator",
 		repo: "/repo",
 		worktree: "/wt",
 		approvalMode: "write",

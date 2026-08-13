@@ -5,8 +5,6 @@ import { entryTimeLabel } from './hub';
 import { unitHref } from './router';
 
 const entry = (overrides: Partial<ChannelEntry> & Pick<ChannelEntry, 'id' | 'seq'>): ChannelEntry => ({
-  id: overrides.id,
-  seq: overrides.seq,
   channelId: 'fleet',
   authorActor: 'manager',
   kind: 'assistant',

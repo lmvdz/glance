@@ -40,7 +40,7 @@ class FakeDriver extends EventEmitter implements AgentDriver {
 		return undefined;
 	}
 	async getState(): Promise<RpcSessionState> {
-		return { todoPhases: [], isStreaming: false } as RpcSessionState;
+		return { todoPhases: [], isStreaming: false } as unknown as RpcSessionState;
 	}
 	respondUi(): void {}
 	respondHostTool(): void {}
@@ -233,7 +233,7 @@ test("prompt is refused (not re-driven) against a terminal-marked workflow reatt
 // visible history on every restart, right when the operator needs it most to decide whether to fork.
 test("a terminal-marked workflow's transcript survives a restart (reattachTerminal threads it through)", async () => {
 	const { mgr: mgr1, repo, stateDir, worktreeBase } = await makeMgr("terminal-transcript");
-	const host1 = mgr1 as unknown as InternalHost & { agents: Map<string, AgentRecordLike & { transcript: { kind: string; text: string; ts: number }[] }> };
+	const host1 = mgr1 as unknown as Omit<InternalHost, "agents"> & { agents: Map<string, AgentRecordLike & { transcript: { kind: string; text: string; ts: number }[] }> };
 
 	const dto = await mgr1.create({ name: "wf-transcript", repo, approvalMode: "yolo", verify: "true" });
 	const rec1 = host1.agents.get(dto.id)!;

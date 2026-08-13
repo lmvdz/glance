@@ -1,8 +1,14 @@
 import { expect, test } from "bun:test";
-import type { Store } from "../src/dal/store.ts";
+import type { AuditEntry, ChannelSearchResult, Store } from "../src/dal/store.ts";
+import type { Channel, ChannelEntry, ChannelMembership, ChannelReadCursor } from "../src/channels.ts";
+import type { Node } from "../src/memory/nodes.ts";
+import type { NodeRecord } from "../src/memory/node-records.ts";
+import type { DelegationGrant } from "../src/delegation-boundary.ts";
+import type { PlanProposal } from "../src/plan-proposals.ts";
+import { normalizeCapabilitySnapshot, type CapabilitySnapshot } from "../src/capabilities/index.ts";
 import { assertRewardTransition, emptyFeedbackSnapshot, scoreValidation, type FeedbackSnapshot } from "../src/feedback.ts";
 import { SquadManager } from "../src/squad-manager.ts";
-import type { Actor, FeedbackValidationResponse, RunReceipt } from "../src/types.ts";
+import type { Actor, FeedbackValidationResponse, PersistedFeature, RunReceipt, TranscriptEntry } from "../src/types.ts";
 
 function response(vote: FeedbackValidationResponse["vote"], pain?: number): FeedbackValidationResponse {
 	return { id: `${vote}-${pain ?? "x"}`, feedbackId: "fb", campaignId: "camp", repo: "/repo", respondent: "u", vote, pain, createdAt: 1 };
@@ -22,8 +28,30 @@ class MemoryStore implements Store {
 	async saveTranscripts(_transcripts: Record<string, TranscriptEntry[]>): Promise<void> {}
 	async loadCapabilities(): Promise<CapabilitySnapshot> { return normalizeCapabilitySnapshot(undefined); }
 	async saveCapabilities(_snapshot: CapabilitySnapshot): Promise<void> {}
-	async appendAudit(entry: { actor: string; action: string; target?: string; detail?: unknown }): Promise<void> { this.audit.push(entry); }
+	async appendAudit(entry: AuditEntry): Promise<void> { this.audit.push(entry as { actor: string; action: string; target?: string; detail?: unknown }); }
 	async appendUsage(_receipt: RunReceipt): Promise<void> {}
+	async listChannels(): Promise<Channel[]> { return []; }
+	async getChannel(_id: string): Promise<Channel | undefined> { return undefined; }
+	async putChannel(_channel: Channel): Promise<void> {}
+	async listNodes(): Promise<Node[]> { return []; }
+	async getNode(_id: string): Promise<Node | undefined> { return undefined; }
+	async putNode(_node: Node): Promise<void> {}
+	async bindNodeChannel(_nodeId: string, _channelId: string): Promise<Node | undefined> { return undefined; }
+	async listNodeRecords(_nodeId: string): Promise<NodeRecord[]> { return []; }
+	async putNodeRecord(_record: NodeRecord): Promise<void> {}
+	async deleteNodeRecords(_nodeId: string, _ids: readonly string[]): Promise<number> { return 0; }
+	async listDelegationGrants(): Promise<DelegationGrant[]> { return []; }
+	async putDelegationGrant(_grant: DelegationGrant): Promise<void> {}
+	async listPlanProposals(): Promise<PlanProposal[]> { return []; }
+	async putPlanProposal(_proposal: PlanProposal): Promise<void> {}
+	async listChannelEntries(_channelId: string, _since?: number): Promise<ChannelEntry[]> { return []; }
+	async searchChannelEntries(_q: string, _limit?: number, _offset?: number): Promise<ChannelSearchResult[]> { return []; }
+	async appendChannelEntry(entry: Omit<ChannelEntry, "seq">): Promise<ChannelEntry> { return { ...entry, seq: 0 }; }
+	async nextChannelSeq(_channelId: string): Promise<number> { return 0; }
+	async listChannelMemberships(_channelId: string): Promise<ChannelMembership[]> { return []; }
+	async putChannelMembership(_row: ChannelMembership): Promise<void> {}
+	async getChannelReadCursor(_channelId: string, _userId: string): Promise<ChannelReadCursor | undefined> { return undefined; }
+	async putChannelReadCursor(_row: ChannelReadCursor): Promise<void> {}
 }
 
 test("validation score handles none, weak, medium, and strong confidence", () => {

@@ -14,8 +14,8 @@
  *    and each kind's well-known extras) and lets anything else through unexamined rather than
  *    reaching for `Schema.Record` passthrough where the shape isn't genuinely open. `refs` and
  *    `pinned` ARE genuinely open (their keys vary per kind/emit), so those use `Schema.Record`.
- *  - The projection funnel (`squad-manager.ts#projectUnitTranscriptEvent`) derives one shared
- *    `{ refs, doorSurface, face }` envelope for every kind it routes (`projectionFace` computes a
+ *  - The projection funnel (`unit-card-projector.ts#event`) derives one shared
+ *    `{ refs, doorSurface, face }` envelope for every kind it routes (its `face()` computes a
  *    superset of extras regardless of kind, `needsYouFace`/`tokenBurnFace` are its two exceptions),
  *    so most kinds below share one schema. The four bespoke inline emit sites — design-revised,
  *    mention-steer, return-emit, and the token-burn fleet rollup — get dedicated face schemas
@@ -64,7 +64,7 @@ const ToneSchema = Schema.Literals(["neutral", "info", "warning", "success", "de
 export type CardRegister = "checked" | "claim" | "unverified";
 const RegisterSchema = Schema.Literals(["checked", "claim", "unverified"]);
 
-/** Every `doorSurface` a card emitter sets today (`squad-manager.ts#projectionDoorSurface` plus
+/** Every `doorSurface` a card emitter sets today (`unit-card-projector.ts#doorSurface` plus
  *  the three bespoke sites' literals). Closes the surface to what the client actually knows how
  *  to route (`webapp/src/lib/channelTimeline.ts#hrefFromPayload`). */
 const DoorSurfaceSchema = Schema.Literals(["plan", "intervence", "land", "land-merge", "gate-verdict", "unit", "fleet-economics"]);
@@ -94,7 +94,7 @@ const BaseFaceFields = {
 };
 const BaseFaceSchema = Schema.Struct(BaseFaceFields);
 
-/** `refs` is small and enumerable across every emit site (see `projectionRefs`, and the three
+/** `refs` is small and enumerable across every emit site (see `unit-card-projector.ts#refs`, and the three
  *  bespoke sites) — genuinely closed, not open, so it's modeled field-by-field rather than as a
  *  passthrough record. */
 const RefsSchema = Schema.Struct({
@@ -120,7 +120,7 @@ const RefsSchema = Schema.Struct({
 });
 
 /**
- * `squad-manager.ts#projectionFace`'s default branch — shared by every kind it routes generically
+ * `unit-card-projector.ts#face`'s default branch — shared by every kind it routes generically
  * (land-attempt, land-assessment, land-merge, gate-verdict, plan-card, unit-spawned,
  * unit-turn-finished, unit-failed, pr-opened, verification-ran, and the unit-path half of
  * token-burn-snapshot). One function derives all of these extras regardless of kind, so one face
@@ -363,7 +363,7 @@ function emitCardConstructor<K extends TranscriptEventKind>(kind: K) {
  * — the generic `P &` intersection lets those through without excess-property errors, since the
  * runtime schema tolerates them too (see file header).
  *
- * Deliberately NOT used by the projection funnel (`projectUnitTranscriptEvent`): it derives faces
+ * Deliberately NOT used by the projection funnel (`unit-card-projector.ts#event`): it derives faces
  * from `unknown` transcript payloads, where a compile-time constructor can assert nothing and
  * `validateCardPayload` above is the only check that helps.
  */

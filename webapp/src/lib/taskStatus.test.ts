@@ -151,7 +151,7 @@ describe('taskListRank', () => {
 });
 
 describe('validator veto downgrades "ready to land"', () => {
-  const veto = { verdict: 'veto' as const, agreement: 0, confidence: 0.9, perCriterion: [], rationale: 'nope' };
+  const veto = { verdict: 'veto' as const, ranAt: 1, agreement: 0, confidence: 0.9, perCriterion: [], rationale: 'nope' };
   test('a vetoed land-ready agent is CRITICAL "review", never a calm "ready to land"', () => {
     const s = summarizeTask([agent('a', 'idle', { landReady: true, validation: veto })]);
     expect(s.posture).toBe('needs-you');

@@ -6,7 +6,7 @@
  * codebase's CLI tests, so this doesn't invent one.
  */
 import { describe, expect, test } from "bun:test";
-import { renderDiff, renderDiffStat } from "../src/index.ts";
+import { renderDiff, renderDiffStat } from "../src/cli/render.ts";
 import type { FileDiff } from "../src/explore.ts";
 
 const modified: FileDiff = {

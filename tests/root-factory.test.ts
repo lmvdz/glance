@@ -19,7 +19,7 @@ import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { rootFactoryEnabled } from "../src/index.ts";
+import { rootFactoryEnabled } from "../src/boot.ts";
 import { ROOT_FACTORY_ORG, SquadServer } from "../src/server.ts";
 import { SquadManager } from "../src/squad-manager.ts";
 import type { ManagerRegistry } from "../src/manager-registry.ts";
@@ -91,7 +91,7 @@ async function freshStateDir(): Promise<string> {
 
 test("a root manager with a Plane repo configured ARMS its Dispatcher on start()", async () => {
 	const plane = planeStub();
-	configurePlane(plane.port);
+	configurePlane(plane.port!);
 	delete process.env.OMP_SQUAD_AUTODISPATCH; // default ON — this is the factory's dispatch loop
 	try {
 		const mgr = new SquadManager({ stateDir: await freshStateDir() });
@@ -106,7 +106,7 @@ test("a root manager with a Plane repo configured ARMS its Dispatcher on start()
 
 test("OMP_SQUAD_AUTODISPATCH=0 leaves the Dispatcher unarmed even with a Plane repo", async () => {
 	const plane = planeStub();
-	configurePlane(plane.port);
+	configurePlane(plane.port!);
 	process.env.OMP_SQUAD_AUTODISPATCH = "0";
 	try {
 		const mgr = new SquadManager({ stateDir: await freshStateDir() });
@@ -190,7 +190,7 @@ test("root factory OFF: no root manager ⇒ every org (incl. the sentinel) route
 test("the operator's fleet for /api/factory/status is the ROOT factory, reporting its live loops (not a tenant's)", async () => {
 	// A REAL root manager with a backlog → its dispatch loop arms; factoryStatus() (PR #21) reads that live field.
 	const plane = planeStub();
-	configurePlane(plane.port);
+	configurePlane(plane.port!);
 	delete process.env.OMP_SQUAD_AUTODISPATCH;
 	try {
 		const root = new SquadManager({ stateDir: await freshStateDir() });

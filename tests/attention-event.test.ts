@@ -157,7 +157,7 @@ test('an onUi "notify" RPC method appends an attentionEvents entry with source "
 	const mgr = await freshManager();
 	seed(mgr, "a1");
 
-	mgr.fireUi("a1", { type: "extension_ui_request", id: "n1", method: "notify", message: "context window nearing limit", notifyType: "warn" } as RpcExtensionUIRequest);
+	mgr.fireUi("a1", { type: "extension_ui_request", id: "n1", method: "notify", message: "context window nearing limit", notifyType: "warn" } as unknown as RpcExtensionUIRequest);
 
 	const dto = mgr.getAgent("a1");
 	const events = dto?.attentionEvents as AttentionEvent[] | undefined;

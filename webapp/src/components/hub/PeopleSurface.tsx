@@ -1,5 +1,5 @@
 import React from 'react';
-import { apiJson, deleteOrgVoiceKey, jsonInit, putOrgVoiceKey, setOrgVoiceEnabled, type VoiceKeyStatus } from '../../lib/api';
+import { getOrgVoiceStatus, apiJson, deleteOrgVoiceKey, jsonInit, putOrgVoiceKey, setOrgVoiceEnabled, type VoiceKeyStatus } from '../../lib/api';
 import { useAuth } from '../../context/AuthContext';
 import { RULES_ARE_NEVER_MERGED, inviteConsequence, joinPolicyLine, outboundKeyLine, whatTheirWordDoes, type RoomMember } from '../../lib/roomPeople';
 
@@ -55,7 +55,10 @@ export function PeopleSurface() {
           setPolicy((await apiJson<{ policy: 'auto' | 'approval' | null }>('/api/org/join-policy').catch(() => ({ policy: null }))).policy);
         }
       }
-      setVoice(await apiJson<VoiceKeyStatus>('/api/org/voice-key').catch(() => null));
+      // getOrgVoiceStatus spells the REAL route (codex H, concern 27 round): the old raw fetch hit
+      // /api/org/voice-key, which only supports PUT/DELETE — the swallowed 404 told admins with a
+      // LIVE key that none was stored, and the UI offered to replace it.
+      setVoice(await getOrgVoiceStatus().catch(() => null));
     } catch (err) {
       // A failed read is not an empty room. Rendering "no members" would be a claim about who is here.
       setError(err instanceof Error ? err.message : 'this room’s people could not be read');

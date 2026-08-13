@@ -48,10 +48,8 @@ import {
 	steerRefusalCopy,
 	threadStatus,
 	withoutRawRoomEvents,
-	type VoiceCallArtifactDTO,
-	type VoiceCallBindingDTO,
-	type VoiceCallDecisionDTO,
 } from "../webapp/src/lib/voice/roomCall.ts";
+import type { VoiceCallArtifactDTO, VoiceCallBindingDTO, VoiceCallDecisionDTO } from "../webapp/src/lib/api.ts";
 
 function actor(userId: string, orgId = "org-a"): Actor {
 	return { id: `db:${userId}`, displayName: userId, origin: "local", role: "operator", orgId };
