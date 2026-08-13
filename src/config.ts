@@ -203,8 +203,8 @@ export function landConfirmEnabled(): boolean {
  * single root SquadManager that does. Default OFF — a bare SaaS deployment never silently spins a global
  * factory.
  *
- * Lives here, not in `index.ts`, so the server can report the factory's real state to `glance doctor`
- * without importing the CLI entrypoint (a cycle). `index.ts` re-exports it for the boot-gate test.
+ * Lives here, not in the boot module, so the server can report the factory's real state to `glance doctor`
+ * without importing the composition root (a cycle). `boot.ts` re-exports it for the boot-gate test.
  */
 export function rootFactoryEnabledWith(repoCount: number): boolean {
 	return envBool("OMP_SQUAD_ROOT_FACTORY", false) && repoCount > 0;
