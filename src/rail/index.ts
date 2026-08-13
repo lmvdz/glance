@@ -29,13 +29,39 @@ export {
 	mdEsc,
 	classifyLand,
 	writeLandReceipt,
+	appendLandReceiptIndexRow,
 	postReceiptComment,
+	receiptCommentOptions,
 	landReceiptDir,
 	landReceiptFilename,
 	landReceiptIndexRow,
 	landReceiptIndexPath,
 	LAND_RECEIPT_INDEX_FILE,
 } from "./receipt/index.ts";
+
+// The self-land lane (glance#391): where a self-routed PR's acceptance criteria come from, so a
+// glance PR cannot land "skipped" (validator.ts:496) and therefore UNMEASURED. See self-land/criteria.ts.
+// Plus the round-3 durable journal (H-3): a merged measured land is never lost to a receipt-write fault.
+export {
+	acceptanceCriteriaFromPrBody,
+	criteriaFromTexts,
+	journalPending,
+	journalFinalized,
+	journalQueued,
+	journalAborted,
+	readSelfLandJournal,
+	journalRowsForWindow,
+	unconfirmedSelfLands,
+	reconcileUnconfirmedSelfLands,
+	selfLandJournalPath,
+	newSelfLandAttemptId,
+	type SelfLandJournalEntry,
+	type SelfLandJournalStatus,
+	type QueuedPrState,
+	type QueuedPrReader,
+	type ReconcileAction,
+	type ReconcileOutcome,
+} from "./self-land/index.ts";
 
 // Dogfood-window instrumentation (landing-rail #339): the READ + COUNT side of the land-receipt
 // index writeLandReceipt appends. See src/rail/land-metrics.ts.

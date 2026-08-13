@@ -99,6 +99,16 @@ export interface LandReceipt {
 	branch: string;
 	/** The landed commit SHA (full). Absent when nothing merged (a rejected land). */
 	commit?: string;
+	/**
+	 * The PRE-MERGE head commit the gate actually verified — the tip of the PR branch the scratch-merge
+	 * gate + validator graded, captured BEFORE the merge (glance#392, R1 G8). Distinct from `commit`
+	 * (the post-merge merge commit): a PRE-MERGE required check runs against the PR's CURRENT head, which
+	 * equals THIS SHA, never the merge commit that doesn't exist yet. The wedge (`verifyReceiptForPr`)
+	 * matches a PR's live head against `headCommit ?? commit` — so a rail receipt can green the exact
+	 * pre-merge head it proves, while an agent/post-merge receipt (no `headCommit`) keeps the old
+	 * merge-commit semantics. Absent on an ordinary agent land and on any land with no gated head.
+	 */
+	headCommit?: string;
 	/** The landed commit's subject line — the human-written "what/why" of the change. Absent when
 	 *  nothing merged, or when it couldn't be read. A core part of approving a receipt, not a diff. */
 	message?: string;
@@ -129,6 +139,15 @@ export interface LandReceipt {
 
 	// ── 5. COST ───────────────────────────────────────────────────────────────────────────────────
 	cost: LandReceiptCost;
+
+	// ── 6. SELF-LAND PROVENANCE (glance#391 M-1) ────────────────────────────────────────────────────
+	/** How this land's acceptance criteria were sourced, on a self-land. `"pr-body"` = declared in the
+	 *  PR's own `## Acceptance` checklist (tied to a durable, reviewable artifact); `"call"` = supplied
+	 *  in the land request (weaker provenance — a criterion invented at land time has no independent
+	 *  tie to the diff). Absent on an ordinary agent land (criteria came from the feature store). The
+	 *  window reports the two sources separately so a run of `"call"` lands can't quietly pad the
+	 *  measured count. */
+	criteriaSource?: "pr-body" | "call";
 }
 
 /**
@@ -180,4 +199,16 @@ export interface LandReceiptIndexRow {
 	gateStatus: GateStatus;
 	/** The validator's measured reviewer-precision stamp, when a validator ran. Absent otherwise. */
 	precision?: LandReceiptPrecision;
+	/** The validator's VERDICT (glance#391 round 3, C-3). A measured land is one a judge evaluated to
+	 *  `pass` — `isMeasuredLand` requires this, so an `abstain` (which IS precision-stamped) can never
+	 *  be counted as measured on `precision.n>0` alone. Absent when no validator ran. */
+	verdict?: ValidationRecord["verdict"];
+	/** Self-land criteria provenance (glance#391 M-1) — `"pr-body"` (declared, tied to the PR) vs
+	 *  `"call"` (supplied at land time, weaker). Absent on an ordinary agent land. Lets the window
+	 *  count declared-criteria lands separately from call-supplied ones. */
+	criteriaSource?: "pr-body" | "call";
+	/** Stable identity of the LAND this row records — `<branch>\0<commit>` (glance#391 round 4 M-1).
+	 *  A land is uniquely (branch, merge-commit); the reader dedupes on this so a double-append (the
+	 *  retry-after-a-late-EIO case) can never double-count. Absent on a not-landed row (no commit). */
+	landId?: string;
 }

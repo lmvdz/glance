@@ -5,6 +5,7 @@ import {
 	mdEsc,
 	classifyLand,
 	writeLandReceipt,
+	receiptCommentOptions,
 	landReceiptDir,
 	landReceiptFilename,
 	type LandReceipt,
@@ -454,5 +455,52 @@ describe("attribution correctness (gauntlet round 1, Cluster B)", () => {
 		const md = renderReceiptComment(r);
 		expect(md).toContain("rail(T6): the receipt surface");
 		expect(md).toContain("showed $0 for unattributed");
+	});
+});
+
+// ── receiptCommentOptions (glance#392 G6) — reachable-from-the-PR href resolution ─────────────────
+
+describe("receiptCommentOptions — the PR-comment href posture", () => {
+	const KEY = "GLANCE_RECEIPT_BASE_URL";
+	const save = process.env[KEY];
+	function restore(): void {
+		if (save === undefined) delete process.env[KEY];
+		else process.env[KEY] = save;
+	}
+
+	test("no base URL ⇒ NO href (the dead local path is dropped, not shown)", () => {
+		delete process.env[KEY];
+		const opts = receiptCommentOptions("/home/lars/.omp/land-receipts/deepen-x-123-abc.html");
+		expect(opts).toEqual({});
+		restore();
+	});
+
+	test("base URL set ⇒ a clickable served URL to the receipt route, using only the basename", () => {
+		process.env[KEY] = "https://glance.example.com/";
+		const opts = receiptCommentOptions("/home/lars/.omp/land-receipts/deepen-x-123-abc.html");
+		expect(opts.hrefKind).toBe("url");
+		expect(opts.receiptHref).toBe("https://glance.example.com/api/land-receipts/deepen-x-123-abc.html");
+		restore();
+	});
+
+	test("a served URL renders as a real link in the comment; a dropped href renders nothing", () => {
+		process.env[KEY] = "https://glance.example.com";
+		const r: LandReceipt = {
+			repo: "lmvdz/glance",
+			branch: "deepen/x",
+			commit: "c".repeat(40),
+			files: ["a.ts"],
+			landed: true,
+			at: Date.now(),
+			gate: { status: "green", unprovenGreenRejected: false, newRegressions: [], baseWasRed: false },
+			forcedWithoutProof: false,
+			cost: { costUnknown: true },
+		};
+		const withUrl = renderReceiptComment(r, receiptCommentOptions("/s/land-receipts/deepen-x-1-c.html"));
+		expect(withUrl).toContain("[open the full receipt](https://glance.example.com/api/land-receipts/deepen-x-1-c.html)");
+		delete process.env[KEY];
+		const withoutUrl = renderReceiptComment(r, receiptCommentOptions("/s/land-receipts/deepen-x-1-c.html"));
+		expect(withoutUrl).not.toContain("full receipt");
+		restore();
 	});
 });

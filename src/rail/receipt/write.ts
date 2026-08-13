@@ -79,6 +79,15 @@ export function landReceiptIndexRow(receipt: LandReceipt): LandReceiptIndexRow {
 					},
 				}
 			: {}),
+		// The validator verdict (glance#391 round 3, C-3): `isMeasuredLand` requires `verdict==="pass"`,
+		// so an abstain/skipped land can never be counted as measured on precision.n alone.
+		...(receipt.validation?.verdict ? { verdict: receipt.validation.verdict } : {}),
+		// Self-land criteria provenance (glance#391 M-1) — carried through so the window can report
+		// declared (pr-body) vs call-supplied lands separately. Absent on an ordinary agent land.
+		...(receipt.criteriaSource ? { criteriaSource: receipt.criteriaSource } : {}),
+		// Stable land identity for read-dedupe (glance#391 round 4 M-1): a land is uniquely
+		// (branch, merge-commit). Present only when something merged (a commit exists).
+		...(receipt.commit ? { landId: `${receipt.branch}\0${receipt.commit}` } : {}),
 	};
 }
 
@@ -141,11 +150,39 @@ function parseNewRegressions(detail: string): string[] {
 }
 
 /**
+ * Durably append ONE index row to `<stateDir>/land-receipts/index.jsonl` — the window's countable
+ * substrate — DECOUPLED from the best-effort HTML receipt (glance#391 round 3, H-3). A self-land calls
+ * this as a must-succeed step after a confirmed merge, so a failure to render/write the HTML can never
+ * leave a merged, measured land with no window row. Retries a bounded number of times, then THROWS so
+ * the caller can be loud (and fall back to the journal), never silently drop the row.
+ */
+export async function appendLandReceiptIndexRow(stateDir: string, receipt: LandReceipt): Promise<void> {
+	await fs.mkdir(landReceiptDir(stateDir), { recursive: true });
+	const line = JSON.stringify(landReceiptIndexRow(receipt)) + "\n";
+	let lastErr: unknown;
+	for (let attempt = 0; attempt < 3; attempt++) {
+		try {
+			await fs.appendFile(landReceiptIndexPath(stateDir), line, "utf8");
+			return;
+		} catch (err) {
+			lastErr = err;
+			await new Promise((r) => setTimeout(r, 20 * (attempt + 1)));
+		}
+	}
+	if (lastErr instanceof Error) throw lastErr;
+	throw new Error(String(lastErr));
+}
+
+/**
  * Write the self-contained HTML receipt under `<stateDir>/land-receipts/`. Returns the absolute path.
  * Best-effort caller contract: a receipt-write failure must NEVER fail the land — the caller wraps
  * this in a try/catch (same posture as every other post-land ledger write).
+ *
+ * `skipIndex` (glance#391 round 3): the self-land path appends the index row itself, DURABLY, via
+ * `appendLandReceiptIndexRow` BEFORE this best-effort HTML — so pass `skipIndex:true` there to avoid a
+ * duplicate index row. The agent path leaves it false (HTML + index together, both best-effort).
  */
-export async function writeLandReceipt(stateDir: string, receipt: LandReceipt): Promise<string> {
+export async function writeLandReceipt(stateDir: string, receipt: LandReceipt, opts: { skipIndex?: boolean } = {}): Promise<string> {
 	const dir = landReceiptDir(stateDir);
 	await fs.mkdir(dir, { recursive: true });
 	const html = renderReceiptHtml(receipt);
@@ -161,8 +198,9 @@ export async function writeLandReceipt(stateDir: string, receipt: LandReceipt): 
 			// wrote. Deliberately its OWN try/catch, separate from the caller's best-effort land wrapper:
 			// an index-append failure must never lose the human-facing HTML receipt already on disk, so it
 			// is swallowed here. Undercounting is the failure mode, never a lost receipt or a failed land.
+			// `skipIndex` (self-land): the row was already appended durably before this HTML.
 			try {
-				await fs.appendFile(landReceiptIndexPath(stateDir), JSON.stringify(landReceiptIndexRow(receipt)) + "\n", "utf8");
+				if (!opts.skipIndex) await fs.appendFile(landReceiptIndexPath(stateDir), JSON.stringify(landReceiptIndexRow(receipt)) + "\n", "utf8");
 			} catch (e) {
 				// index is best-effort; the HTML receipt is the durable record. WARN rather than swallow
 				// silently (grok #361): a persistent append failure (disk full, index-only perms) would
@@ -180,6 +218,36 @@ export async function writeLandReceipt(stateDir: string, receipt: LandReceipt): 
 		}
 	}
 	throw new Error("writeLandReceipt: could not mint a non-colliding receipt filename after 5 attempts");
+}
+
+/**
+ * Resolve how a PR comment should link to the full HTML receipt (glance#392 G6 — "receipts reachable
+ * from the PR"). Two honest postures, chosen by whether the daemon has a reachable base URL:
+ *
+ *  - `GLANCE_RECEIPT_BASE_URL` is set (the daemon is reachable — a tunnel, a deployed webapp): the
+ *    comment links to the SERVED route `<base>/api/land-receipts/<file>` as a real, clickable URL a
+ *    browser can open. `src/server.ts` serves that route from `<stateDir>/land-receipts/`.
+ *  - it is NOT set (a laptop daemon with no public URL — the common case): the href is OMITTED
+ *    entirely. The old `hrefKind:"path"` rendered an escaped LOCAL filesystem path that is useless to
+ *    anyone off the daemon host (the exact R1 G6 defect); the comment's own summary table is already
+ *    the readable receipt, so dropping the dead link is strictly better than showing it.
+ *
+ * Never emits a broken local-path link. `htmlPath` is the absolute path `writeLandReceipt` returned;
+ * only its basename is used to form the served URL (the file lives under the receipts dir the route
+ * scopes to).
+ *
+ * AUTH CAVEAT (grok/codex gauntlet): the served route is viewer-tier and sits behind the daemon's auth
+ * gate. A top-level browser navigation from GitHub cannot attach an `Authorization: Bearer` header, so
+ * in FILE mode WITH a token the link 401s. Set `GLANCE_RECEIPT_BASE_URL` only where the route is
+ * reachable without a bearer header — DB mode (cookie auth attaches to navigation), or a
+ * tunnel/localhost with no token. When it isn't set, the comment's own summary table is the fallback
+ * (the receipt is still readable, just not one-click). See the env var's note in .env.example.
+ */
+export function receiptCommentOptions(htmlPath: string): CommentOptions {
+	const base = process.env.GLANCE_RECEIPT_BASE_URL?.trim();
+	if (!base) return {};
+	const url = `${base.replace(/\/+$/, "")}/api/land-receipts/${encodeURIComponent(path.basename(htmlPath))}`;
+	return { receiptHref: url, hrefKind: "url" };
 }
 
 /**

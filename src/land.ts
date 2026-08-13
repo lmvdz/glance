@@ -21,7 +21,7 @@ import { landRiskGateEnabled, landRiskReason } from "./rail/land-risk.ts";
 import { conflictMarkerGateEnabled, conflictMarkerReasonForFiles, conflictMarkerReasonForRange, conflictMarkerReasonStaged } from "./conflict-markers.ts";
 import { GIT_HARDEN_ARGS, GIT_HARDEN_ENV, gitNoSignEnv } from "./git-harden.ts";
 import { harnessAuthEnv, scrubbedSpawnEnv } from "./spawn-env.ts";
-import type { FeatureCriterion } from "./types.ts";
+import type { FeatureCriterion, ValidationRecord } from "./types.ts";
 
 export interface LandResult {
 	ok: boolean;
@@ -72,6 +72,14 @@ export interface LandResult {
 	 */
 	head0?: string;
 	landedCommit?: string;
+	/**
+	 * PR mode only (glance#391 round 4, H-2): `gh pr merge` exited 0 but ENQUEUED the PR into a merge
+	 * queue rather than merging synchronously — the merge will happen later, asynchronously. `ok`/`merged`
+	 * stay false (nothing has landed YET), but the caller must NOT record this as a failed/aborted land:
+	 * a queued PR that later merges is a real land, so the self-land journals it `queued` and the drain
+	 * reconciles it, never writing `aborted` for an exit-zero enqueue.
+	 */
+	enqueued?: boolean;
 }
 
 /**
@@ -165,6 +173,43 @@ export interface LandOpts {
 	featureId?: string;
 	criteria?: FeatureCriterion[];
 	validatorOverride?: boolean;
+	/**
+	 * Self-land merge-point guards (glance#391 C-2 / C-3 / H-1), all enforced UNDER the repo land lock
+	 * immediately before the merge — closing the TOCTOU between an early check and the actual merge.
+	 * All three are self-land-only (a normal agent land leaves them undefined and is unaffected):
+	 *  - `expectBase`: the branch this land is ALLOWED to merge INTO. Local mode asserts the repo's
+	 *    checked-out branch equals it; PR mode asserts the PR's live base equals it. A mismatch refuses
+	 *    (non-retryable) rather than merging into a trunk the caller never named — "whatever is checked
+	 *    out" is never an acceptable target.
+	 *  - `expectHeadOid`: the commit SHA the proof + validator actually graded. PR mode re-reads the
+	 *    PR's live head under the lock and refuses if it moved — so the tree that was gated is exactly
+	 *    the tree that merges, never "gate one branch, merge another".
+	 *  - `refuseDraft`: refuse a PR still marked draft (GitHub reports drafts as OPEN, and glance's own
+	 *    PRs are normally drafts) rather than silently `gh pr ready`-ing and merging it.
+	 */
+	expectBase?: string;
+	expectHeadOid?: string;
+	refuseDraft?: boolean;
+	/**
+	 * Self-land measurement invariant (glance#391 round 3, C-3): when set, `landBranch`'s OWN validator
+	 * gate refuses unless the verdict is an evaluated `pass` over every declared criterion — not merely
+	 * "not a veto/inconclusive". This makes `landBranch` the SINGLE authoritative verdict site: there is
+	 * no separate pre-gate the inner gate can silently disagree with (the earlier design let a pre-gate
+	 * pass while the dispatch-time gate abstained, merging on an unmeasured verdict). `skipped`,
+	 * `abstain`, and any non-`pass` verdict block the land here, before any merge. Ignored by the land
+	 * primitives (read at the manager's runValidatorGate seam, like every field in this block).
+	 */
+	requireValidationPass?: boolean;
+	/**
+	 * Observer for the validator record this land produced (glance#391). `runValidatorGate` stamps the
+	 * record onto the AGENT DTO (`rec.dto.validation`) — which only exists when `agentId` resolves to a
+	 * live roster entry, so a record-free land (`selfLand`) had no way to see the verdict its own land
+	 * was graded on, and therefore no way to put `reviewerPrecision` on its receipt. This is that seam:
+	 * called exactly once per `landBranch`, with the FINAL record (post-`withFreshReviewerPrecision`),
+	 * whether it vetoed or passed. Ignored by land.ts/land-pr.ts — like every other field in this block,
+	 * it is read at the manager's dispatch seam, never by the land primitives.
+	 */
+	onValidation?: (record: ValidationRecord) => void;
 	/** Bypass the land blast-radius gate (C-LAND) — set by the human Land / force-land path so a
 	 *  deliberate large/sensitive merge always lands. Mirrors `validatorOverride`. */
 	riskOverride?: boolean;
@@ -614,6 +659,19 @@ async function landAgentImpl(opts: LandOpts): Promise<LandResult> {
 	if (!opts.riskOverride && landRiskGateEnabled()) {
 		const riskReason = await landRiskReason(repo, branch);
 		if (riskReason) return { ok: false, committed, merged: false, message, detail: riskReason };
+	}
+
+	// Self-land base guard (glance#391 C-2), checked HERE — under the repo land lock, immediately
+	// before the merge — not at an early caller check a checkout switch could invalidate. Local mode
+	// merges the branch INTO whatever `repo` has checked out, so the target IS the repo's current
+	// branch: assert it equals the branch the caller explicitly authorized, or refuse. `--show-current`
+	// is empty on a detached HEAD, which is likewise not the named target.
+	if (opts.expectBase !== undefined) {
+		const cur = await git(["branch", "--show-current"], repo);
+		const current = cur.code === 0 ? cur.stdout.trim() : "";
+		if (current !== opts.expectBase) {
+			return { ok: false, committed, merged: false, message, detail: `self-land base guard: ${repo} has "${current || "a detached HEAD"}" checked out, not the authorized target "${opts.expectBase}" — refusing to merge into a branch the caller never named` };
+		}
 	}
 
 	// Capture pre-merge main HEAD so a failed verification can roll main back, and resolve the

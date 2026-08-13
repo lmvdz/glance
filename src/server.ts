@@ -48,6 +48,7 @@ import {
 	CommentsCreateBodySchema,
 	ConsoleBodySchema,
 	ConsoleReleaseBodySchema,
+	SelfLandBodySchema,
 	decodeBody,
 	decodeBodyOrEmpty,
 	DiscardHeldSyncBodySchema,
@@ -1182,6 +1183,35 @@ export class SquadServer {
 			// later concept in the loop can be A/B-compared against this. ?windowMs= sizes the rollup window.
 			const windowMs = Number(url.searchParams.get("windowMs"));
 			return Response.json(learningLoopPayloadAcross(managers, Number.isFinite(windowMs) && windowMs > 0 ? windowMs : undefined));
+		}
+		if (url.pathname === "/api/land-receipts") {
+			// Dogfood receipt surface (glance#392 G6): the land-receipt index across this session's
+			// managers, newest-first — so the evidence a PR comment references is reachable from a browser,
+			// not only as a file on the daemon host. Viewer-tier read (like /api/adoption): a receipt is
+			// the honest self-contained record the whole window is about, not sensitive data.
+			const rows = (await Promise.all(managers.map((m) => m.landReceiptIndexRows()))).flat();
+			rows.sort((a, b) => b.at - a.at);
+			return Response.json({ receipts: rows });
+		}
+		const receiptFileMatch = url.pathname.match(/^\/api\/land-receipts\/([^/]+)$/);
+		if (receiptFileMatch) {
+			// Serve one self-contained HTML receipt by name (glance#392 G6) — the target the PR-comment
+			// URL points at when GLANCE_RECEIPT_BASE_URL is set. Each manager validates the name and scopes
+			// it strictly under its own land-receipts/ dir (no traversal); the first manager that has it
+			// wins. Absent ⇒ 404, never a directory listing or a path echo.
+			let name: string;
+			try {
+				name = decodeURIComponent(receiptFileMatch[1]);
+			} catch {
+				// A malformed percent-escape (`%` not followed by two hex digits) throws URIError; `handle`
+				// isn't wrapped, so that would surface as a 500. A bad name is simply not found.
+				return new Response("receipt not found", { status: 404 });
+			}
+			for (const m of managers) {
+				const html = await m.readLandReceiptHtml(name);
+				if (html !== undefined) return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+			}
+			return new Response("receipt not found", { status: 404 });
 		}
 		if (url.pathname === "/api/adoption") {
 			// Dogfood adoption counters (plans/daily-dogfood-engine/02): casual sessions/prompts/push-taps
@@ -2806,6 +2836,34 @@ export class SquadServer {
 			if (Result.isFailure(decoded)) return new Response("repo required", { status: 400 });
 			const released = manager.releaseEphemeralProject(decoded.success.repo);
 			return Response.json(released, { status: released.ok ? 200 : 500 });
+		}
+		// Self-land (glance#391 / #362): route a branch or PR of THIS repo through the rail — validator
+		// gate, real proof run, measured receipt — with no agent record behind it. Admin tier (authz.ts),
+		// same as `/api/agents/:id/land`: it merges into a trunk. Every refusal is a 409 with a `refusal`
+		// code, never a 5xx — "no acceptance criteria" / "gate red" / "unmeasured" are answers.
+		//
+		// `measured` is the validator VERDICT (a judge graded every criterion and passed, BEFORE the
+		// merge), never inferred from `ok` or from precision.n alone (glance#391 C-1). `expectBase` is
+		// required — the branch the land is authorized to merge into (C-2).
+		if (url.pathname === "/api/self-land" && req.method === "POST") {
+			const decodedSelfLand = decodeBody(SelfLandBodySchema, await req.json().catch(() => null));
+			if (Result.isFailure(decodedSelfLand)) return new Response("repo required", { status: 400 });
+			const b = decodedSelfLand.success;
+			const expectBase = typeof b.expectBase === "string" ? b.expectBase.trim() : "";
+			if (!expectBase) return new Response("expectBase required: name the branch the land may merge into", { status: 400 });
+			const prNumber = typeof b.pr === "number" ? b.pr : typeof b.pr === "string" && /^\d+$/.test(b.pr.trim()) ? Number(b.pr.trim()) : undefined;
+			if (b.pr !== undefined && prNumber === undefined) return new Response("pr must be a PR number", { status: 400 });
+			const criteria = Array.isArray(b.criteria) ? b.criteria.filter((c): c is string => typeof c === "string") : undefined;
+			const selfLandResult = await manager.selfLand({
+				repo: b.repo,
+				branch: typeof b.branch === "string" ? b.branch : undefined,
+				pr: prNumber,
+				criteria,
+				message: typeof b.message === "string" ? b.message : undefined,
+				expectBase,
+				actor,
+			});
+			return Response.json(selfLandResult, { status: selfLandResult.ok ? 200 : 409 });
 		}
 		// Push-tap beacon (daily-dogfood-engine 02): the webapp fires this ONCE per notification-tap
 		// page open (`?push=1` marker on push payload URLs, sessionStorage-deduped client-side).
