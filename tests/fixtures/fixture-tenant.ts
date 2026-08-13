@@ -16,18 +16,24 @@
  *   6. a count-asserting CI-style script (`node scripts/assert-counts.mjs`) — atrium's discipline in
  *      miniature (asserts on counts and sets, not exit codes).
  *
- * HONESTY NOTE — what is real vs. representational, stated rather than implied. The two classes that
- * are ABOUT infrastructure are fully real: gate 1 runs real pnpm against a real lockfile, and gate 5
- * brings up a real Postgres via real `docker compose --wait` and connects to it with a real `psql`.
- * The classes that are ABOUT the rail's parser (2/3/4/6) run committed node scripts that emit the
- * canonical toolchain OUTPUT (a Vitest summary line, `name=count` lines) the rail's `readGateEvidence`
- * consumes. This is squarely inside the rail's own documented guarantee (tenant-gates.ts: "a builder
- * controls its own gate's stdout, so `tests: N` proves the runner EMITTED a summary claiming N ran,
- * not that N truly executed … the real defense is the hermetic sandbox + independent reviewer, not
- * this parser"). The rail never ran vitest/tsc/biome itself even for glance; it runs the tenant's
- * command and reads the output. So a script emitting a real Vitest summary exercises the EXACT seam a
- * real Vitest run would. The gate behaviour is rigged through a committed `gates/control.json`, so a
- * "red fixture" is a real repo whose real scripts really produce the rigged output — not a stub.
+ * HONESTY NOTE — what is real vs. representational, stated rather than implied (narrowed after the B5
+ * gauntlet's H-2). THREE classes are fully real end to end:
+ *   - gate 1 runs real pnpm against a real committed lockfile (offline);
+ *   - the R6 `test` gate runs a REAL test-runner BINARY (`bun test`) over REAL `.test.ts` files with
+ *     REAL assertions, so its count assertion is checked against a genuine runner summary, not a
+ *     printed one (the H-2 fix — "a real tool executed", not just "the parser parsed");
+ *   - gate 5 brings up a real Postgres via real `docker compose --wait` and connects with a real `psql`.
+ * The remaining classes (typecheck / lint / ci-counts, and the R2 Vitest-shape refusal gate) are
+ * PARSER-SEAM exercises: committed node scripts that emit the canonical toolchain OUTPUT (`name=count`
+ * lines, a Vitest summary line) `readGateEvidence` consumes. That is deliberate and inside the rail's
+ * own documented guarantee (tenant-gates.ts: "a builder controls its own gate's stdout … the real
+ * defense is the hermetic sandbox + independent reviewer, not this parser") — the rail is a
+ * parser-not-executor and never ran tsc/biome/vitest itself even for glance. What R6 proves, exactly:
+ * the rail parses a foreign tenant's gate output AND lands a green contract via a real merge, real
+ * pnpm, a REAL test-runner, and real compose Postgres — NOT that a real tsc/Biome binary executed
+ * (those stay simulated, and the claim is narrowed to say so). Rigging is a committed
+ * `gates/control.json` the real scripts read — a "red fixture" is a real repo really producing the
+ * rigged output, not a stub.
  */
 
 import * as fs from "node:fs/promises";
@@ -156,11 +162,21 @@ async function writeFixtureFiles(repo: string, control: FixtureControl): Promise
 	await write("biome.json", `${JSON.stringify({ $schema: "https://biomejs.dev/schemas/1.0.0/schema.json", linter: { enabled: true } }, null, 2)}\n`);
 	await write("README.md", "# glance-fixture-tenant\n\nA disposable foreign-stack fixture minted by B5 #394. Not a fork of atrium.\n");
 
-	// Two real workspace projects, so "Vitest workspace, >=2 projects" is literally true in the tree.
+	// Two real workspace projects with REAL test files (>=2 projects, literally). The R6 `test` gate
+	// runs `bun test` over these — a REAL runner executing REAL assertions, 3 cases total (a:2 + b:1),
+	// so the count assertion (minTests) is checked against a genuine summary, not a printed one (H-2).
+	const testCases: Record<string, string[]> = {
+		a: [`test("a is 1", () => { expect(a).toBe(1); });`, `test("a doubled is 2", () => { expect(a * 2).toBe(2); });`],
+		b: [`test("b is 2", () => { expect(b).toBe(2); });`],
+	};
 	for (const pkg of ["a", "b"]) {
+		const val = pkg === "a" ? 1 : 2;
 		await write(`packages/${pkg}/package.json`, `${JSON.stringify({ name: `@fixture/${pkg}`, version: "0.0.0", private: true }, null, 2)}\n`);
-		await write(`packages/${pkg}/index.ts`, `export const ${pkg}: number = ${pkg === "a" ? 1 : 2};\n`);
-		await write(`packages/${pkg}/${pkg}.test.ts`, `import { ${pkg} } from "./index.ts";\nexport const cases = [${pkg}];\n`);
+		await write(`packages/${pkg}/index.ts`, `export const ${pkg}: number = ${val};\n`);
+		await write(
+			`packages/${pkg}/${pkg}.test.ts`,
+			`import { test, expect } from "bun:test";\nimport { ${pkg} } from "./index.ts";\n${testCases[pkg]!.join("\n")}\n`,
+		);
 	}
 
 	await write("gates/typecheck.mjs", typecheckScript());
@@ -177,6 +193,21 @@ export interface MintOptions {
 	/** Register the fixture's manifest into a glance-side registry at this stateDir — the authority
 	 *  round-trip (register → get → drive) the whole tenant capability rests on. */
 	register?: { stateDir: string; manifest: TenantGateManifest };
+	/**
+	 * The repo directory basename (M-1: run-unique teardown scoping). The rail derives its compose
+	 * project name from `basename(gate cwd)`, so a run-unique label makes every container/network this
+	 * fixture's gates create share a `glance-gate-<sanitized-label>-*` prefix — which a teardown sweep
+	 * can target WITHOUT touching a concurrent suite's or a live daemon's `glance-gate-*` resources.
+	 * Alphanumeric only (the rail strips the rest); defaults to a random run-unique token.
+	 */
+	label?: string;
+}
+
+/** The compose project prefix the rail will use for a fixture minted with `label` — mirrors the
+ *  rail's own basename sanitization (tenant-services.ts). A teardown sweep filters on exactly this. */
+export function composeProjectPrefix(label: string): string {
+	const sanitized = label.replace(/[^a-z0-9]+/gi, "").toLowerCase().slice(0, 20) || "t";
+	return `glance-gate-${sanitized}`;
 }
 
 /**
@@ -186,7 +217,10 @@ export interface MintOptions {
  */
 export async function mintFixtureTenant(opts: MintOptions = {}): Promise<FixtureTenant> {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "glance-fixture-"));
-	const repo = path.join(root, "tenant");
+	// The repo basename becomes the rail's compose-project prefix (M-1 scoping). Sanitize to what the
+	// rail keeps so the dir name and the derived project prefix cannot drift.
+	const label = (opts.label ?? `b5${Math.random().toString(36).slice(2, 10)}`).replace(/[^a-z0-9]+/gi, "").toLowerCase().slice(0, 20) || "t";
+	const repo = path.join(root, label);
 	await fs.mkdir(repo, { recursive: true });
 	const tmps = [root];
 
@@ -266,9 +300,18 @@ export const gateLint: TenantGate = {
 	timeoutMs: DEFAULT_TIMEOUT_MS,
 	expects: { exit: 0, parser: "raw" },
 };
-/** The Vitest-workspace gate with an asserted count (the --passWithNoTests killer). */
+/** The Vitest-SHAPE gate — a parser-seam exercise (emits a canonical Vitest summary). Used by R2 to
+ *  drive the `count-violated` refusal against the vitest parser. */
 export function gateVitest(minTests: number): TenantGate {
 	return { name: "test", command: "pnpm test", timeoutMs: DEFAULT_TIMEOUT_MS, expects: { exit: 0, parser: "vitest", minTests } };
+}
+/**
+ * The REAL test-runner gate (H-2): a genuine `bun test` binary over the fixture's REAL `.test.ts`
+ * files with REAL assertions (3 cases: a×2 + b×1). The count assertion is checked against a real
+ * runner summary, not a printed one. Scoped to the two files so the run count is deterministic.
+ */
+export function gateRealBunTest(minTests: number): TenantGate {
+	return { name: "test", command: "bun test packages/a/a.test.ts packages/b/b.test.ts", timeoutMs: DEFAULT_TIMEOUT_MS, expects: { exit: 0, parser: "bun-test", minTests } };
 }
 /** The count-asserting CI script gate. */
 export function gateCountsScript(exactCounts: Record<string, number>): TenantGate {
@@ -346,7 +389,7 @@ export function greenManifest(repo: string): TenantGateManifest {
 		gatePnpmInstall,
 		gateTypecheck,
 		gateLint,
-		gateVitest(12),
+		gateRealBunTest(3), // H-2: a REAL runner over real .test.ts, not a printed summary
 		gateIntegrationPostgres(),
 		gateCountsScript({ files: 3, cases: 12 }),
 	]);
